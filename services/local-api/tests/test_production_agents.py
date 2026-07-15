@@ -69,14 +69,22 @@ EXPECTED_ASSIGNMENTS: dict[str, tuple[tuple[str, ...], int]] = {
             "get_reviews",
             "synthesize_script_voice",
             "build_cutlist",
+            "save_contact_sheet",
             "render_production",
             "revert_artifact",
         ),
-        8,
+        10,
     ),
     "qa_reviewer": (
-        ("board_status", "get_storyline", "get_script", "review_export", "save_qa_report"),
-        5,
+        (
+            "board_status",
+            "get_storyline",
+            "get_script",
+            "review_export",
+            "save_contact_sheet",
+            "save_qa_report",
+        ),
+        6,
     ),
 }
 
@@ -206,7 +214,9 @@ def test_prompts_carry_contracts() -> None:
     assert "viral arc" in by_name["story_architect"].system_message.lower()
     assert "german" in by_name["scene_author"].system_message.lower()
     assert "never cut the voice" in by_name["coding_agent"].system_message.lower()
+    assert "save_contact_sheet" in by_name["coding_agent"].system_message
     assert "ship or revise" in by_name["qa_reviewer"].system_message.lower()
+    assert "save_contact_sheet" in by_name["qa_reviewer"].system_message
 
 
 # --- build_production_team ---------------------------------------------------------------------

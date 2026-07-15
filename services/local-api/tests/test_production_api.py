@@ -26,7 +26,7 @@ from laura.db import repos
 from laura.db.database import SqliteDatabase
 from laura.main import create_app
 from laura.short_creator.board import Board
-from laura.short_creator.board_models import BoardMeta
+from laura.short_creator.board_models import BoardMeta, ContactSheet, ContactSheetTile
 from laura.short_creator.production_orchestrator import board_root_for
 
 _TOKEN = "test-token"
@@ -233,7 +233,7 @@ def test_get_production_status_shape(tmp_path: Path) -> None:
     assert body["meta"]["session_id"] == "sess_002"
     assert body["scene_reviews"] == {"count": 0, "scenes": []}
     assert set(body["artifacts"]) == {
-        "storyline", "script", "voice", "cutlist", "render_report", "qa_report",
+        "storyline", "script", "voice", "cutlist", "contact_sheet", "render_report", "qa_report",
     }
     # Fresh board, no expected scenes resolvable (no rough cut) -> first chain artifact.
     assert body["resume_point"] == "storyline"
@@ -242,4 +242,80 @@ def test_get_production_status_shape(tmp_path: Path) -> None:
 def test_get_production_status_unknown_session_404(tmp_path: Path) -> None:
     client, _db = _app(tmp_path)
     r = client.get("/production/does-not-exist", headers=_H)
+    assert r.status_code == 404, r.text
+
+
+def _save_contact_sheet_on_board(
+    db: SqliteDatabase, asset_id: str, session_id: str, png: Path
+) -> None:
+    """Seed a contact_sheet artifact (pointing at *png*) straight onto the session's board."""
+    board = Board.open(board_root_for(db, asset_id, session_id))
+    board.save(
+        "contact_sheet",
+        ContactSheet(
+            png_path=str(png),
+            cols=1,
+            rows=1,
+            tiles=[ContactSheetTile(order=0, scene_number=1, frame=30, label="0 S1")],
+        ),
+    )
+
+
+def test_get_production_status_carries_contact_sheet_details(tmp_path: Path) -> None:
+    """The artifacts block lists contact_sheet like every chain artifact (version +
+    archived_versions) and — once one exists — additionally its png_path + tile list, so a
+    client can show the checkpoint without another roundtrip."""
+    client, db = _app(tmp_path)
+    asset_id = _seed_session_with_board(db, tmp_path, session_id="sess_003")
+    png = tmp_path / "sheet.png"
+    png.write_bytes(b"png-bytes")
+    _save_contact_sheet_on_board(db, asset_id, "sess_003", png)
+
+    r = client.get("/production/sess_003", headers=_H)
+    assert r.status_code == 200, r.text
+    sheet = r.json()["artifacts"]["contact_sheet"]
+
+    assert sheet["version"] == 1
+    assert sheet["png_path"] == str(png)
+    assert sheet["labeled"] is True
+    assert sheet["tiles"] == [{"order": 0, "scene_number": 1, "frame": 30, "label": "0 S1"}]
+
+
+# ---------------------------------------------------------------------------
+# GET /production/{session_id}/contact-sheet
+# ---------------------------------------------------------------------------
+
+
+def test_get_contact_sheet_serves_png(tmp_path: Path) -> None:
+    client, db = _app(tmp_path)
+    asset_id = _seed_session_with_board(db, tmp_path, session_id="sess_004")
+    png = tmp_path / "sheet.png"
+    png.write_bytes(b"png-bytes")
+    _save_contact_sheet_on_board(db, asset_id, "sess_004", png)
+
+    r = client.get("/production/sess_004/contact-sheet", headers=_H)
+
+    assert r.status_code == 200, r.text
+    assert r.headers["content-type"] == "image/png"
+    assert r.content == b"png-bytes"
+
+
+def test_get_contact_sheet_404s(tmp_path: Path) -> None:
+    """404 on: unknown session, board without a contact_sheet artifact yet, and an artifact
+    whose png has vanished from disk (the DB/board lookup comes FIRST — the filesystem is only
+    touched at a path the board's own artifact recorded, never one derived from client input)."""
+    client, db = _app(tmp_path)
+
+    r = client.get("/production/does-not-exist/contact-sheet", headers=_H)
+    assert r.status_code == 404, r.text
+
+    asset_id = _seed_session_with_board(db, tmp_path, session_id="sess_005")
+    r = client.get("/production/sess_005/contact-sheet", headers=_H)
+    assert r.status_code == 404, r.text
+
+    png = tmp_path / "gone.png"
+    png.write_bytes(b"png-bytes")
+    _save_contact_sheet_on_board(db, asset_id, "sess_005", png)
+    png.unlink()
+    r = client.get("/production/sess_005/contact-sheet", headers=_H)
     assert r.status_code == 404, r.text

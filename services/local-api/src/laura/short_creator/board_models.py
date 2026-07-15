@@ -141,6 +141,31 @@ class Cutlist(BaseModel):
         return self
 
 
+class ContactSheetTile(BaseModel):
+    """One cutlist segment's sampled frame inside the contact-sheet grid."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    order: int = Field(ge=0)
+    scene_number: int = Field(ge=1)
+    frame: int = Field(ge=0)  # sampled SOURCE frame (the segment window's middle)
+    label: str
+
+
+class ContactSheet(BaseModel):
+    """One grid PNG over the cutlist (each segment's middle frame, tiles in segment order) —
+    the visual pre-render checkpoint a user signs off on before render_production runs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: int = Field(default=1, ge=1)
+    png_path: str
+    cols: int = Field(gt=0)
+    rows: int = Field(gt=0)
+    labeled: bool = True  # False when no usable font was found (tiles unlabeled, sheet still valid)
+    tiles: list[ContactSheetTile] = Field(min_length=1)
+
+
 class RenderCheck(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

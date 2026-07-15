@@ -5,8 +5,9 @@ the Production Board (:mod:`.board`) — never talking directly to each other ab
 through board artifacts (scene reviews -> storyline -> script -> voice/cutlist/render -> QA). The
 pipeline is a fixed judgment chain: ``vision_reviewer`` (what is actually on screen) ->
 ``story_architect`` (the arc) -> ``scene_author`` (the words) -> ``coding_agent`` (voice, cutlist,
-render — execution only, plus reverting the board to an earlier artifact version when explicitly
-asked to) -> ``qa_reviewer`` (ship or revise on the rendered result). Each tool name in the roster
+contact sheet, render — execution only, plus reverting the board to an earlier artifact version
+when explicitly asked to) -> ``qa_reviewer`` (ship or revise on the rendered result). Each tool
+name in the roster
 is cross-checked in tests against :func:`production_tools.build_production_tool_specs`'s real
 tool names.
 
@@ -42,7 +43,8 @@ def production_agent_specs() -> list[AgentSpec]:
     Production Board rather than talking to each other directly: ``vision_reviewer`` reviews every
     scene with the VLM, ``story_architect`` structures reviewed scenes into the viral arc,
     ``scene_author`` writes the spoken script from that arc, ``coding_agent`` executes voice ->
-    cutlist -> render without changing content, and ``qa_reviewer`` judges the rendered result.
+    cutlist -> contact sheet -> render without changing content, and ``qa_reviewer`` judges the
+    rendered result.
     """
     return [
         AgentSpec(
@@ -124,10 +126,16 @@ def production_agent_specs() -> list[AgentSpec]:
                 "by the Story Architect or Scene Author. Check board_status, then read the "
                 "storyline (get_storyline), script (get_script) and reviews (get_reviews) so you "
                 "know what you are rendering. Pipeline, strictly in order: "
-                "synthesize_script_voice -> build_cutlist -> render_production. Read the checks "
+                "synthesize_script_voice -> build_cutlist -> save_contact_sheet -> "
+                "render_production. save_contact_sheet is the user's visual pre-render "
+                "checkpoint — NEVER skip it, and re-run it after EVERY build_cutlist call (a "
+                "cutlist save archives the current sheet). If the task or a user message says "
+                "to stop at the contact sheet, end after save_contact_sheet and report its "
+                "tiles instead of rendering. Read the checks "
                 "render_production returns: if voice does not fit (voice_fits is false), do not "
                 "shorten it — build_cutlist already sizes segments to the voice's chapter audio "
-                "windows, so rebuild the cutlist and render again; if it STILL fails, the scenes "
+                "windows, so rebuild the cutlist (then a fresh contact sheet) and render again; "
+                "if it STILL fails, the scenes "
                 "ran out of material — report that the storyline needs more/longer scenes. NEVER "
                 "cut the voice — it is the script the team already agreed on, and the video must "
                 "fit it, not the other way round. "
@@ -144,10 +152,11 @@ def production_agent_specs() -> list[AgentSpec]:
                 "get_reviews",
                 "synthesize_script_voice",
                 "build_cutlist",
+                "save_contact_sheet",
                 "render_production",
                 "revert_artifact",
             ),
-            max_tool_iterations=8,
+            max_tool_iterations=10,
         ),
         AgentSpec(
             name="qa_reviewer",
@@ -161,7 +170,10 @@ def production_agent_specs() -> list[AgentSpec]:
                 "full voice is present with nothing clipped mid-word. Your verdict is ship or "
                 "revise, saved via save_qa_report together with concrete findings — every finding "
                 "must name WHERE (which scene or timestamp) and WHAT is wrong, no vague words "
-                "like 'looks off'. If save_qa_report returns validation errors, fix exactly what "
+                "like 'looks off'. Use the board's contact sheet as your segment map — its "
+                "tiles are labeled '<order> S<scene_number>' — and if it is missing or stale "
+                "after a cutlist change, call save_contact_sheet to restore the user's visual "
+                "checkpoint. If save_qa_report returns validation errors, fix exactly what "
                 "it names and save again."
             ),
             tool_names=(
@@ -169,9 +181,10 @@ def production_agent_specs() -> list[AgentSpec]:
                 "get_storyline",
                 "get_script",
                 "review_export",
+                "save_contact_sheet",
                 "save_qa_report",
             ),
-            max_tool_iterations=5,
+            max_tool_iterations=6,
         ),
     ]
 

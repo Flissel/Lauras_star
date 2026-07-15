@@ -173,6 +173,12 @@ def test_task_text_contains_contract_and_resume(tmp_path: Path) -> None:
     assert "viral arc" in fresh.lower()
     assert "do not redo" in fresh.lower()
     assert "scene_reviews:1" in fresh  # fresh board -> scene 1 not reviewed yet
+    # The contact-sheet checkpoint is part of the mandatory order AND documented as the known
+    # steer-by-message pattern (stop at the Kontaktbogen / render later) — no session state.
+    assert "save_contact_sheet" in fresh
+    assert "Kontaktbogen" in fresh
+    assert "dann stopp" in fresh
+    assert "render jetzt" in fresh
 
     board.save_scene_review(_review(1))
     board.save(

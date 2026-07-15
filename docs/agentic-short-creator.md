@@ -117,3 +117,41 @@ Hinweise: Sessions brauchen das `autoshort`-Extra (sonst 503); Jobs laufen mit `
 ein grobes Run-Log liegt unter `agent-runs/<session_id>/runs/`. Free-Tier-Resilienz:
 `LAURA_AGENT_MODEL_POOL` / `LAURA_VLM_MODEL_POOL` rotieren bei leeren Antworten sticky auf das
 nächste Modell. ChatPanel-Anbindung (Slice 5) folgt.
+
+### Kontaktbogen-Checkpoint (Freigabe vor dem Render)
+
+Zwischen `cutlist` und `render_report` sitzt der **Kontaktbogen** (`contact_sheet`): EIN
+Grid-PNG mit dem Fenster-Mittel-Frame jedes Cutlist-Segments (aus dem Editorial-Proxy, als PNG —
+nicht mjpeg), Kacheln in Segment-Reihenfolge und beschriftet mit `<order> S<szenennummer>`
+(z. B. `2 S5` = drittes Segment, Szene 5; ohne brauchbaren Font degradiert der Bogen zu
+unbeschrifteten Kacheln, `labeled: false`). Der Coding-Agent baut ihn **immer** direkt nach
+`build_cutlist` und **vor** `render_production`; eine Cutlist-Änderung archiviert den aktuellen
+Bogen automatisch (Board-Chain-Invalidierung) und erzwingt einen frischen.
+
+```bash
+# Board-Status: artifacts.contact_sheet trägt version, png_path, labeled + Kachel-Liste
+curl -H "X-Laura-Token: $TOKEN" http://127.0.0.1:8765/production/<session_id>
+
+# Das PNG selbst (404, solange noch keiner auf dem Board liegt)
+curl -H "X-Laura-Token: $TOKEN" \
+  http://127.0.0.1:8765/production/<session_id>/contact-sheet -o kontaktbogen.png
+```
+
+**Freigabe-Flow ohne neuen Session-Zustand** (bekanntes Muster im Task-Contract): Du steuerst
+den Checkpoint rein über `/message` gegen den normalen Resume-Flow — es gibt keinen extra
+Approval-Status. Beispiel:
+
+```bash
+# 1) Bis zum Kontaktbogen bauen, dann anhalten (der Run endet nach save_contact_sheet)
+curl -X POST -H "X-Laura-Token: $TOKEN" -H "Content-Type: application/json" \
+  -d '{"text": "bau bis zum Kontaktbogen, dann stopp"}' \
+  http://127.0.0.1:8765/production/<session_id>/message
+
+# 2) Bogen ansehen (siehe oben), ggf. nachjustieren ("Kachel 2 S5 raus, Hook kürzer" → neue
+#    Cutlist → neuer Bogen) …
+
+# 3) … und erst dann rendern lassen: der Folge-Run setzt am Resume-Punkt (render) auf
+curl -X POST -H "X-Laura-Token: $TOKEN" -H "Content-Type: application/json" \
+  -d '{"text": "render jetzt"}' \
+  http://127.0.0.1:8765/production/<session_id>/message
+```

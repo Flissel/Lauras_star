@@ -9,6 +9,8 @@ from laura.short_creator.board_models import (  # noqa: E402
     BestWindow,
     BoardMeta,
     Chapter,
+    ContactSheet,
+    ContactSheetTile,
     Cutlist,
     CutSegment,
     Roi,
@@ -66,8 +68,9 @@ def test_scene_reviews_sorted_by_number(tmp_path: Path) -> None:
 
 def test_downstream_of() -> None:
     assert downstream_of("scene_reviews") == (
-        "storyline", "script", "voice", "cutlist", "render_report", "qa_report")
-    assert downstream_of("cutlist") == ("render_report", "qa_report")
+        "storyline", "script", "voice", "cutlist", "contact_sheet", "render_report", "qa_report")
+    assert downstream_of("cutlist") == ("contact_sheet", "render_report", "qa_report")
+    assert downstream_of("contact_sheet") == ("render_report", "qa_report")
     assert downstream_of("qa_report") == ()
 
 
@@ -86,6 +89,11 @@ def _script() -> Script:
 def _cutlist() -> Cutlist:
     return Cutlist(segments=[CutSegment(order=0, scene_number=1, start_frame=0,
                                         end_frame_exclusive=120)])
+
+
+def _contact_sheet() -> ContactSheet:
+    return ContactSheet(png_path="/tmp/sheet.png", cols=1, rows=1,
+                        tiles=[ContactSheetTile(order=0, scene_number=1, frame=60, label="0 S1")])
 
 
 def test_singleton_save_load_and_version_stamp(tmp_path: Path) -> None:
@@ -122,6 +130,27 @@ def test_save_invalidates_downstream(tmp_path: Path) -> None:
     board.save("cutlist", _cutlist())
     board.save("storyline", _storyline("changed"))
     assert board.load("script") is None and board.load("cutlist") is None
+
+
+def test_cutlist_save_archives_contact_sheet(tmp_path: Path) -> None:
+    """A cutlist change invalidates the contact sheet (and everything downstream of it): the
+    current sheet is archived — never lost — and gone from the board until save_contact_sheet
+    reruns against the new cutlist."""
+    board = Board.create(tmp_path / "board", _meta())
+    board.save("storyline", _storyline())
+    board.save("script", _script())
+    board.save("cutlist", _cutlist())
+    assert board.save("contact_sheet", _contact_sheet()) == 1
+    loaded = board.load("contact_sheet")
+    assert isinstance(loaded, ContactSheet)
+    assert loaded.tiles[0].scene_number == 1
+
+    board.save("cutlist", _cutlist())  # -> cutlist v2, invalidates contact_sheet + downstream
+
+    assert board.load("contact_sheet") is None
+    assert board.versions("contact_sheet") == [1]  # archived, not lost
+    archived = tmp_path / "board" / "versions" / "contact_sheet.v1.json"
+    assert archived.is_file() and "sheet.png" in archived.read_text(encoding="utf-8")
 
 
 def test_revert_restores_and_invalidates(tmp_path: Path) -> None:

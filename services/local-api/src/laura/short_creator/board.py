@@ -22,6 +22,7 @@ from pydantic import BaseModel
 
 from laura.short_creator.board_models import (
     BoardMeta,
+    ContactSheet,
     Cutlist,
     QaReport,
     RenderReport,
@@ -37,12 +38,21 @@ class _Versioned(Protocol):
 
     version: int
 
-_CHAIN: tuple[str, ...] = ("storyline", "script", "voice", "cutlist", "render_report", "qa_report")
+_CHAIN: tuple[str, ...] = (
+    "storyline",
+    "script",
+    "voice",
+    "cutlist",
+    "contact_sheet",
+    "render_report",
+    "qa_report",
+)
 _SINGLETONS: dict[str, type[BaseModel]] = {
     "storyline": Storyline,
     "script": Script,
     "voice": VoiceArtifact,
     "cutlist": Cutlist,
+    "contact_sheet": ContactSheet,
     "render_report": RenderReport,
     "qa_report": QaReport,
 }

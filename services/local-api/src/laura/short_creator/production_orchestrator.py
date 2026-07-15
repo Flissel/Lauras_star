@@ -87,7 +87,10 @@ def build_production_task(
        + version, the resume point, and an explicit "do not redo" instruction). When ``message``
        is set, any artifact that has archived versions also lists them (``[archived: vN, ...]``)
        so the team can name a concrete ``(name, version)`` pair back to ``revert_artifact``;
-    4. the mandatory stage order (reviews -> storyline -> script -> voice+cutlist+render -> qa);
+    4. the mandatory stage order (reviews -> storyline -> script -> voice+cutlist ->
+       contact sheet -> render -> qa) plus the contact-sheet checkpoint as a known pattern:
+       stopping at the Kontaktbogen or rendering later is steered purely by follow-up
+       messages against the normal resume flow - no extra session state;
     5. the German-script language rule plus the coding-agent's ``voice_fits`` charter;
     6. the QA revision-round limit (one revise round, then ship with findings as warnings);
     7. only when ``message`` is set: the user's follow-up request text (capped at 2000 chars)
@@ -147,8 +150,16 @@ def build_production_task(
         "   Artifacts already on the board are DONE - do not redo them; continue at the "
         "resume point.\n"
         "\n"
-        "4) MANDATORY ORDER: reviews -> storyline -> script -> voice+cutlist+render "
+        "4) MANDATORY ORDER: reviews -> storyline -> script -> voice+cutlist -> contact sheet "
+        "(save_contact_sheet: ALWAYS right after build_cutlist and BEFORE render_production, "
+        "and again after every cutlist rebuild - a cutlist save archives the sheet) -> render "
         "(coding_agent) -> qa. Do not skip or reorder a stage.\n"
+        "   CONTACT-SHEET CHECKPOINT (known pattern, no extra session state): the user steers "
+        "around the Kontaktbogen purely by follow-up messages. When the task or a user message "
+        "says to stop at the contact sheet (e.g. 'bau bis zum Kontaktbogen, dann stopp'), END "
+        "the run right after save_contact_sheet and report the sheet's tiles instead of "
+        "rendering; a later message (e.g. 'render jetzt') resumes at render_production through "
+        "the normal resume flow.\n"
         "\n"
         "5) LANGUAGE + CHARTER: the script MUST be written in German (the source video's "
         "language) - never switch languages mid-script. Coding-agent charter: if voice_fits "

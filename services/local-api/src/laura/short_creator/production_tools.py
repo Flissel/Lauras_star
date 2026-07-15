@@ -49,6 +49,17 @@ segment, hard-capped at the scene's end-exclusive frame boundary — so the pict
 boundaries track the continuous voice instead of drifting apart (chapter word-shares are not
 chapter time-shares).
 
+``save_contact_sheet`` is the Kontaktbogen checkpoint between cutlist and render: one grid PNG
+over the cutlist (each segment's window-middle frame out of the editorial proxy, tiles in segment
+order, labeled ``<order> S<scene_number>``), saved as the board's ``contact_sheet`` artifact —
+the chain link between ``cutlist`` and ``render_report``, so a cutlist change archives and
+invalidates the sheet like any other downstream artifact. Purely mechanical ffmpeg (PNG frames —
+NOT mjpeg, which breaks on non-full-range YUV proxies — then the ``tile`` filter); labels are
+drawn with ``drawtext`` from a small cross-platform font-candidate list and degrade to an
+unlabeled sheet (``labeled=False``) when no usable font exists, rather than failing the
+checkpoint. The user steers around this checkpoint purely via follow-up ``/message`` calls
+("build up to the contact sheet, then stop" / "render now") — no new session state.
+
 ``render_production``/``review_export``/``save_qa_report`` close out the pipeline (Task 6).
 ``render_production`` turns the cutlist into the actual render call (``deps.render_segments``,
 falling back to the real :func:`laura.mcp.tools.tool_render_segments`, resolved lazily like every
@@ -80,7 +91,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import subprocess
+import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -99,6 +112,8 @@ from .board import Board, downstream_of
 from .board_models import (
     BestWindow,
     Chapter,
+    ContactSheet,
+    ContactSheetTile,
     Cutlist,
     CutSegment,
     QaFinding,
@@ -306,6 +321,113 @@ def _grab_video_frames(path: Path, at_seconds: list[float]) -> list[bytes]:
         if proc.returncode == 0 and proc.stdout:
             out.append(proc.stdout)
     return out
+
+
+# --- contact sheet (ffmpeg-only: PNG frames + tile filter) ---------------------------------------
+
+_SHEET_TILE_WIDTH = 480
+# First existing candidate wins; labels degrade to "none" (labeled=False) when the list misses —
+# a font must never be a hard dependency of the checkpoint.
+_SHEET_FONT_CANDIDATES = (
+    "C:/Windows/Fonts/arial.ttf",
+    "C:/Windows/Fonts/segoeui.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+    "/System/Library/Fonts/Helvetica.ttc",
+)
+
+
+def _grid_shape(n: int) -> tuple[int, int]:
+    """Near-square grid for ``n`` tiles: ``cols = ceil(sqrt(n))``, rows to fit."""
+    cols = max(1, math.ceil(math.sqrt(n)))
+    return cols, max(1, math.ceil(n / cols))
+
+
+def _find_fontfile() -> str | None:
+    return next((c for c in _SHEET_FONT_CANDIDATES if Path(c).is_file()), None)
+
+
+def _filter_quote(value: str) -> str:
+    """Quote a value for use inside an ffmpeg filter argument: forward slashes (Windows drive
+    paths), the filter-level specials (``:``, ``'``) backslash-escaped, single-quoted."""
+    normalized = value.replace("\\", "/")
+    escaped = normalized.replace("'", r"\'").replace(":", r"\:")
+    return f"'{escaped}'"
+
+
+def _label_filter(label: str, fontfile: str) -> str:
+    return (
+        f"drawtext=fontfile={_filter_quote(fontfile)}:text={_filter_quote(label)}"
+        ":x=10:y=8:fontsize=30:fontcolor=white:box=1:boxcolor=black@0.55:boxborderw=8"
+    )
+
+
+def _run_ffmpeg_quiet(args: list[str]) -> bool:
+    """Run one ffmpeg invocation, success as bool — an OSError (no ffmpeg) is just failure."""
+    try:
+        proc = subprocess.run([ffmpeg_bin(), "-v", "error", "-y", *args], capture_output=True)  # noqa: S603
+    except OSError:
+        return False
+    return proc.returncode == 0
+
+
+def _extract_sheet_tiles(
+    proxy: Path,
+    times_labels: list[tuple[float, str]],
+    tiles_dir: Path,
+    fontfile: str | None,
+) -> tuple[bool, bool, int | None]:
+    """One scaled PNG per (timestamp, label) into ``tiles_dir/tile_%03d.png``.
+
+    PNG, never mjpeg — mjpeg breaks on non-full-range YUV proxies. Labels use ``drawtext``;
+    when the labeled pass fails (broken font, ffmpeg without freetype) the WHOLE sheet is
+    retried once unlabeled instead of mixing labeled and plain tiles. Returns
+    ``(ok, labeled, failed_index)``."""
+    labeled = fontfile is not None
+    while True:
+        failed: int | None = None
+        for i, (t, label) in enumerate(times_labels):
+            vf = f"scale={_SHEET_TILE_WIDTH}:-2"
+            if labeled and fontfile is not None:
+                vf += "," + _label_filter(label, fontfile)
+            args = [
+                "-ss",
+                f"{max(0.0, t):.6f}",
+                "-i",
+                str(proxy),
+                "-frames:v",
+                "1",
+                "-vf",
+                vf,
+                str(tiles_dir / f"tile_{i:03d}.png"),
+            ]
+            if not _run_ffmpeg_quiet(args):
+                failed = i
+                break
+        if failed is None:
+            return True, labeled, None
+        if labeled:
+            labeled = False  # drawtext is the usual culprit — one plain retry of the whole sheet
+            continue
+        return False, False, failed
+
+
+def _compose_sheet_grid(tiles_dir: Path, cols: int, rows: int, out_png: Path) -> bool:
+    """All ``tile_%03d.png`` frames tiled into ONE ``cols x rows`` grid PNG (empty cells stay
+    padding — the tile filter flushes a partial last grid at EOF)."""
+    return _run_ffmpeg_quiet(
+        [
+            "-framerate",
+            "1",
+            "-i",
+            str(tiles_dir / "tile_%03d.png"),
+            "-frames:v",
+            "1",
+            "-vf",
+            f"tile={cols}x{rows}",
+            str(out_png),
+        ]
+    )
 
 
 def _resolve_scene(db: Database, asset_id: str, scene_number: int) -> tuple[int, int, str] | None:
@@ -974,6 +1096,82 @@ def build_production_tool_specs(
         except Exception as exc:  # tool must never kill the agent loop
             return {"ok": False, "reason": str(exc)[:200]}
 
+    def save_contact_sheet() -> dict[str, Any]:
+        """Build the Kontaktbogen: ONE grid PNG showing every cutlist segment's middle frame
+        (tiles in segment order, each labeled "<order> S<scene_number>"), saved to the board
+        as the contact_sheet artifact. This is the user's visual pre-render checkpoint: call
+        it ALWAYS right after build_cutlist and BEFORE render_production, and again after
+        every cutlist rebuild (saving a cutlist archives the current sheet). Purely
+        mechanical (ffmpeg on the editorial proxy — no model calls, cheap to re-run); when no
+        usable font is found the tiles come back unlabeled (labeled: false) instead of
+        failing. Requires a cutlist on the board and the asset's proxy — reports which one is
+        missing instead of raising."""
+        try:
+            cutlist = board.load("cutlist")
+            if not isinstance(cutlist, Cutlist):
+                return {"ok": False, "reason": "no cutlist on the board; run build_cutlist first"}
+            asset = repos.get_asset(db, asset_id)
+            if asset is None:
+                return {"ok": False, "reason": "asset not found"}
+            proxy = context._proxy_path(db, asset_id)
+            rate = context._frame_rate(db, asset)
+            if proxy is None or rate is None:
+                return {
+                    "ok": False,
+                    "reason": "no proxy for asset - the contact sheet samples the editorial proxy",
+                }
+            rate_num, rate_den = rate
+
+            tiles = [
+                ContactSheetTile(
+                    order=s.order,
+                    scene_number=s.scene_number,
+                    frame=s.start_frame + (s.end_frame_exclusive - s.start_frame) // 2,
+                    label=f"{s.order} S{s.scene_number}",
+                )
+                for s in sorted(cutlist.segments, key=lambda s: s.order)
+            ]
+            cols, rows = _grid_shape(len(tiles))
+            out_dir = board.root.parent / "contact_sheets"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out_png = out_dir / f"{new_id()}.png"
+
+            with tempfile.TemporaryDirectory(prefix="laura-contact-sheet-") as tmp:
+                tiles_dir = Path(tmp)
+                ok, labeled, failed = _extract_sheet_tiles(
+                    Path(proxy),
+                    [(t.frame * rate_den / rate_num, t.label) for t in tiles],
+                    tiles_dir,
+                    _find_fontfile(),
+                )
+                if not ok:
+                    bad = tiles[failed] if failed is not None else tiles[0]
+                    return {
+                        "ok": False,
+                        "reason": (
+                            f"frame extraction from the proxy failed for segment {bad.order} "
+                            f"(frame {bad.frame})"
+                        ),
+                    }
+                if not _compose_sheet_grid(tiles_dir, cols, rows, out_png):
+                    return {"ok": False, "reason": "tile grid composition failed"}
+
+            artifact = ContactSheet(
+                png_path=str(out_png), cols=cols, rows=rows, labeled=labeled, tiles=tiles
+            )
+            version = board.save("contact_sheet", artifact)
+            return {
+                "ok": True,
+                "version": version,
+                "png_path": str(out_png),
+                "cols": cols,
+                "rows": rows,
+                "labeled": labeled,
+                "tiles": [t.model_dump() for t in tiles],
+            }
+        except Exception as exc:  # tool must never kill the agent loop
+            return {"ok": False, "reason": str(exc)[:200]}
+
     def render_production() -> dict[str, Any]:
         """Render the board's cutlist to a finished vertical export and grade it.
 
@@ -1172,7 +1370,8 @@ def build_production_tool_specs(
         archived and removed; the normal pipeline tools then regenerate them). Use this ONLY when
         the task or user message explicitly asks to go back to a prior version — never as a
         routine step — and rebuild anything invalidated afterwards via the normal pipeline. Valid
-        names: storyline, script, voice, cutlist, render_report, qa_report. An unknown name is
+        names: storyline, script, voice, cutlist, contact_sheet, render_report, qa_report. An
+        unknown name is
         rejected with that list instead of raising; a version that was never archived reports
         ok: False with reason "no archived <name> v<version>" instead of raising."""
         try:
@@ -1207,6 +1406,7 @@ def build_production_tool_specs(
         get_script,
         synthesize_script_voice,
         build_cutlist,
+        save_contact_sheet,
         render_production,
         review_export,
         save_qa_report,

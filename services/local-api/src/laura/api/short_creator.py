@@ -11,10 +11,11 @@ import json
 import logging
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import IO, TYPE_CHECKING, Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from ..auth import Principal, require_permission
@@ -306,7 +307,13 @@ def get_production_status(
 
     404 if the session is unknown, 404 if it has no board yet. Never enqueues anything and
     never requires the 'autoshort' extra — this is a pure read of what is already on disk.
+    A present contact_sheet artifact additionally carries its ``png_path``/``labeled``/``tiles``
+    inside the artifacts block (next to the chain-standard version fields), so a client can
+    show the checkpoint without a second lookup; the image bytes come from
+    ``GET /production/{session_id}/contact-sheet``.
     """
+    from ..short_creator.board_models import ContactSheet
+
     db = _db(request)
     session = repos.get_production_session(db, session_id)
     if session is None:
@@ -316,4 +323,41 @@ def get_production_status(
     expected_scenes = _expected_scenes_for(db, asset_id)
     result = board.status()
     result["resume_point"] = board.resume_point(expected_scenes)
+    sheet = board.load("contact_sheet")
+    if isinstance(sheet, ContactSheet):
+        result["artifacts"]["contact_sheet"].update(
+            png_path=sheet.png_path,
+            labeled=sheet.labeled,
+            tiles=[t.model_dump() for t in sheet.tiles],
+        )
     return result
+
+
+@router.get("/production/{session_id}/contact-sheet")
+def get_production_contact_sheet(
+    session_id: str,
+    request: Request,
+    principal: Annotated[Principal, Depends(require_permission("read"))],
+) -> FileResponse:
+    """Serve the session's current contact-sheet PNG (the visual pre-render checkpoint).
+
+    DB-lookup-before-fs guard (mirrors ``GET /shots/{shot_id}/thumbnail``): *session_id* only
+    ever resolves through the sessions table and the board's own artifact record — the served
+    path is the one ``save_contact_sheet`` wrote into the board, never one derived from client
+    input. 404 for an unknown session, a board without a contact_sheet yet, or a png missing
+    on disk.
+    """
+    from ..short_creator.board_models import ContactSheet
+
+    db = _db(request)
+    session = repos.get_production_session(db, session_id)
+    if session is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "session not found")
+    board = _open_board_or_404(db, str(session["asset_id"]), session_id)
+    sheet = board.load("contact_sheet")
+    if not isinstance(sheet, ContactSheet):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no contact sheet on the board yet")
+    path = Path(sheet.png_path)
+    if not path.is_file():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "contact sheet missing on disk")
+    return FileResponse(path, media_type="image/png")
