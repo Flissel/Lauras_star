@@ -164,11 +164,111 @@ def test_no_hits_is_an_empty_ranking_not_an_error(tmp_path: Path, monkeypatch: A
     assert out == {"source": "lexical", "ranking": [], "skipped": []}
 
 
+def test_index_acquisition_failure_falls_back_to_lexical(tmp_path: Path, monkeypatch: Any) -> None:
+    def raise_on_get_index() -> None:
+        raise RuntimeError("semantic index is unavailable")
+
+    monkeypatch.setattr(discovery, "get_index", raise_on_get_index)
+    db = _db(tmp_path)
+    project = repos.create_project(
+        db, name="p", rate_num=FPS, rate_den=1, drop_frame=False, workspace_root="/tmp/p"
+    )
+    asset_id = _seed_asset_with_scenes(
+        db, project["id"], "fallback.mp4", segments=[(10, 60, "mission talk")]
+    )
+
+    out = discovery.search_material(db, project["id"], "mission")
+
+    assert out["source"] == "lexical"
+    assert [entry["asset_id"] for entry in out["ranking"]] == [asset_id]
+
+
+def test_semantic_zero_score_is_not_replaced_with_lexical_default(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    class ZeroScoreIndex:
+        def query(self, text: str, *, project_id: str, limit: int) -> list[dict[str, Any]]:
+            del text, limit
+            return [
+                {
+                    "score": 0.0,
+                    "project_id": project_id,
+                    "asset_id": asset_id,
+                    "segment_id": "segment",
+                    "asset_name": "zero.mp4",
+                    "text": "mission talk",
+                    "start_frame": 10,
+                    "end_frame": 60,
+                    "speaker_label": None,
+                }
+            ]
+
+    db = _db(tmp_path)
+    project = repos.create_project(
+        db, name="p", rate_num=FPS, rate_den=1, drop_frame=False, workspace_root="/tmp/p"
+    )
+    asset_id = _seed_asset_with_scenes(
+        db, project["id"], "zero.mp4", segments=[(10, 60, "mission talk")]
+    )
+    monkeypatch.setattr(discovery, "get_index", lambda: ZeroScoreIndex())
+
+    out = discovery.search_material(db, project["id"], "mission")
+
+    assert out["source"] == "semantic"
+    assert out["ranking"][0]["score"] == 0.0
+    assert out["ranking"][0]["scene_hits"][0]["score"] == 0.0
+
+
+def test_rough_cut_without_scenes_is_skipped_with_its_own_reason(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    monkeypatch.setattr(discovery, "get_index", lambda: None)
+    db = _db(tmp_path)
+    project = repos.create_project(
+        db, name="p", rate_num=FPS, rate_den=1, drop_frame=False, workspace_root="/tmp/p"
+    )
+    asset = repos.create_asset(
+        db,
+        project_id=project["id"],
+        type="video",
+        display_name="unscened.mp4",
+        source_path="/tmp/u",
+    )
+    run = repos.create_analysis_run(db, asset_id=asset["id"], pipeline_version="t", config={})
+    repos.start_analysis_run(db, run["id"])
+    repos.insert_segment_with_words(
+        db,
+        asset_id=asset["id"],
+        run_id=run["id"],
+        speaker_id=None,
+        segment={
+            "start_sample": 0,
+            "end_sample": 16000,
+            "start_frame": 0,
+            "end_frame": 50,
+            "text": "mission talk",
+            "confidence": 1.0,
+        },
+        words=[],
+    )
+    repos.finish_analysis_run(db, run["id"], status="succeeded", diagnostics={})
+    repos.create_timeline(
+        db, project_id=project["id"], name="Rough Cut", kind="rough_cut", created_from=asset["id"]
+    )
+
+    out = discovery.search_material(db, project["id"], "mission")
+
+    assert out["ranking"] == []
+    assert out["skipped"] == [{"asset_id": str(asset["id"]), "reason": "no scenes"}]
+
+
 def test_semantic_ranking_uses_index_when_semantic_extra_is_available(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
     pytest.importorskip("fastembed")
     pytest.importorskip("qdrant_client")
+    from onnxruntime.capi.onnxruntime_pybind11_state import NoSuchFile
+
     from laura.semantic import SemanticIndex
 
     db = _db(tmp_path)
@@ -218,7 +318,7 @@ def test_semantic_ranking_uses_index_when_semantic_extra_is_available(
                 },
             ]
         )
-    except Exception as exc:  # optional model may be absent or incomplete locally
+    except NoSuchFile as exc:  # known optional FastEmbed model/cache unavailability
         pytest.skip(f"semantic model unavailable: {exc}")
     monkeypatch.setattr(discovery, "get_index", lambda: index)
 

@@ -27,15 +27,14 @@ def _segment_hits(
 ) -> tuple[list[dict[str, Any]], str]:
     """(hits, source): semantic when the index exists AND answers, else lexical.
     Mirrors api/search.py's fallback stance — a broken index degrades, never raises."""
-    index = get_index()
-    if index is not None:
-        try:
+    try:
+        index = get_index()
+        if index is not None:
             hits = index.query(topic, project_id=project_id, limit=limit)
-        except Exception:  # noqa: BLE001 - semantic search is best-effort
-            logger.warning("semantic query failed; falling back to lexical", exc_info=True)
-            hits = []
-        if hits:
-            return hits, "semantic"
+            if hits:
+                return hits, "semantic"
+    except Exception:  # noqa: BLE001 - semantic search is best-effort
+        logger.warning("semantic search failed; falling back to lexical", exc_info=True)
     return (
         repos.search_transcript(db, project_id=project_id, query=topic, limit=limit),
         "lexical",
@@ -44,17 +43,18 @@ def _segment_hits(
 
 def _scene_ranges(
     db: Database, project_id: str, asset_id: str
-) -> list[tuple[int, int, int]] | None:
-    """[(scene_number, src_start, src_end_exclusive)] for the asset's rough cut, or None
-    when there is no rough cut / no scenes. Mirrors production_tools._resolve_scene's
-    composition (list_scenes order_index+1, clips, context._scene_src_ranges) but strictly
-    read-only."""
+) -> tuple[list[tuple[int, int, int]], str | None]:
+    """Return rough-cut scene ranges and a stable skip reason, when unavailable.
+
+    This mirrors production_tools._resolve_scene's composition (list_scenes order_index+1,
+    clips, context._scene_src_ranges) while remaining strictly read-only.
+    """
     timeline = repos.get_asset_rough_cut(db, project_id, asset_id)
     if timeline is None:
-        return None
+        return [], "no rough cut"
     scenes = repos.list_scenes(db, str(timeline["id"]))
     if not scenes:
-        return None
+        return [], "no scenes"
     clips = repos.list_timeline_clips(db, str(timeline["id"]))
     resolved: list[tuple[int, int, int]] = []
     for scene in scenes:
@@ -65,7 +65,7 @@ def _scene_ranges(
         )
         if ranges:
             resolved.append((int(scene["order_index"]) + 1, ranges[0][0], ranges[-1][1]))
-    return resolved or None
+    return (resolved, None) if resolved else ([], "no scenes")
 
 
 def search_material(
@@ -75,21 +75,23 @@ def search_material(
     hits, source = _segment_hits(db, project_id, topic, limit)
     per_asset: dict[str, dict[str, Any]] = {}
     skipped: list[dict[str, str]] = []
-    ranges_cache: dict[str, list[tuple[int, int, int]] | None] = {}
+    ranges_cache: dict[str, tuple[list[tuple[int, int, int]], str | None]] = {}
     for hit in hits:
         asset_id = str(hit["asset_id"])
         if asset_id not in ranges_cache:
             ranges_cache[asset_id] = _scene_ranges(db, project_id, asset_id)
-            if ranges_cache[asset_id] is None:
-                skipped.append({"asset_id": asset_id, "reason": "no rough cut"})
-        ranges = ranges_cache[asset_id]
-        if ranges is None:
+            _, skip_reason = ranges_cache[asset_id]
+            if skip_reason is not None:
+                skipped.append({"asset_id": asset_id, "reason": skip_reason})
+        ranges, skip_reason = ranges_cache[asset_id]
+        if skip_reason is not None:
             continue
         start = int(hit.get("start_frame", 0))
         scene_number = next((number for number, low, high in ranges if low <= start < high), None)
         if scene_number is None:
             continue
-        score = float(hit.get("score") or 1.0)
+        raw_score = hit.get("score")
+        score = 1.0 if raw_score is None else float(raw_score)
         entry = per_asset.setdefault(
             asset_id,
             {
