@@ -1618,6 +1618,21 @@ def update_sequence_item_transition(
 
 # --- rough-cut per asset + project-wide scene list -------------------------
 
+def get_asset_rough_cut(
+    db: Database, project_id: str, asset_id: str
+) -> dict[str, Any] | None:
+    """The newest rough_cut timeline for this asset, or None — NEVER creates (the
+    discovery ranking must not leave timelines behind; get_or_create_asset_rough_cut is
+    the writing sibling)."""
+    with db.connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM timelines WHERE project_id=? AND kind='rough_cut' "
+            "AND created_from=? ORDER BY created_at DESC, id DESC LIMIT 1",
+            (project_id, asset_id),
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
 def get_or_create_asset_rough_cut(
     db: Database, project_id: str, asset_id: str
 ) -> dict[str, Any]:
@@ -1626,14 +1641,9 @@ def get_or_create_asset_rough_cut(
     Looks up ``timelines`` where ``project_id=?`` AND ``kind='rough_cut'`` AND
     ``created_from=asset_id``, ordered newest first.  If none exists, creates a
     fresh timeline via :func:`create_timeline` with ``created_from=asset_id``."""
-    with db.connection() as conn:
-        row = conn.execute(
-            "SELECT * FROM timelines WHERE project_id=? AND kind='rough_cut' "
-            "AND created_from=? ORDER BY created_at DESC, id DESC LIMIT 1",
-            (project_id, asset_id),
-        ).fetchone()
-    if row is not None:
-        return dict(row)
+    timeline = get_asset_rough_cut(db, project_id, asset_id)
+    if timeline is not None:
+        return timeline
     return create_timeline(
         db, project_id=project_id, name="Rough Cut", kind="rough_cut", created_from=asset_id
     )
