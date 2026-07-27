@@ -267,7 +267,9 @@ def test_semantic_ranking_uses_index_when_semantic_extra_is_available(
 ) -> None:
     pytest.importorskip("fastembed")
     pytest.importorskip("qdrant_client")
-    from onnxruntime.capi.onnxruntime_pybind11_state import NoSuchFile
+    from onnxruntime.capi.onnxruntime_pybind11_state import (  # type: ignore[import-untyped]
+        NoSuchFile,
+    )
 
     from laura.semantic import SemanticIndex
 
