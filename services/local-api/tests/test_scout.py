@@ -123,6 +123,32 @@ def test_valid_reply_is_adopted_and_task_embeds_ranked_material(tmp_path: Path) 
     assert "mission briefing" in tasks[0]
 
 
+def test_valid_top_level_decision_with_nested_object_is_adopted(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    project_id = _project(db)
+    asset_id = _seed_asset_with_scenes(db, project_id, "mission.mp4")
+
+    decision = scout.run_scout(
+        db,
+        resolve_from_env({}),
+        project_id=project_id,
+        topic="mission",
+        material=_material(asset_id),
+        runner=lambda task: (
+            '{"asset_id": "'
+            + asset_id
+            + '", "scene_numbers": [1], "rationale": "strong", "extra": {"note": "detail"}}'
+        ),
+    )
+
+    assert decision == {
+        "asset_id": asset_id,
+        "scene_numbers": [1],
+        "rationale": "strong",
+        "fallback": False,
+    }
+
+
 def test_unknown_asset_retries_once_with_validation_error(tmp_path: Path) -> None:
     db = _db(tmp_path)
     project_id = _project(db)
@@ -196,6 +222,66 @@ def test_runner_exception_uses_fallback_without_retry(tmp_path: Path) -> None:
 
     assert decision["fallback"] is True
     assert calls == 1
+
+
+def test_runner_timeout_uses_exact_fallback_without_retry(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    project_id = _project(db)
+    asset_id = _seed_asset_with_scenes(db, project_id, "mission.mp4")
+    calls = 0
+
+    def runner(task: str) -> str:
+        nonlocal calls
+        del task
+        calls += 1
+        raise TimeoutError("scout exceeded deadline")
+
+    decision = scout.run_scout(
+        db,
+        resolve_from_env({}),
+        project_id=project_id,
+        topic="mission",
+        material=_material(asset_id),
+        runner=runner,
+    )
+
+    assert decision == {
+        "asset_id": asset_id,
+        "scene_numbers": [1],
+        "rationale": "automatic fallback: top search score",
+        "fallback": True,
+    }
+    assert calls == 1
+
+
+def test_scene_universe_lookup_failure_uses_exact_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = _db(tmp_path)
+    project_id = _project(db)
+    asset_id = _seed_asset_with_scenes(db, project_id, "mission.mp4")
+
+    def unavailable(db: Database, project_id: str, asset_id: str) -> None:
+        del db, project_id, asset_id
+        raise RuntimeError("scene index unavailable")
+
+    monkeypatch.setattr(scout.discovery, "_scene_ranges", unavailable)
+
+    decision = scout.run_scout(
+        db,
+        resolve_from_env({}),
+        project_id=project_id,
+        topic="mission",
+        material=_material(asset_id),
+        runner=lambda task: '{"asset_id": "unexpected", "scene_numbers": [1], "rationale": "x"}',
+    )
+
+    assert decision == {
+        "asset_id": asset_id,
+        "scene_numbers": [1],
+        "rationale": "automatic fallback: top search score",
+        "fallback": True,
+    }
 
 
 def test_empty_ranking_is_a_programming_error(tmp_path: Path) -> None:

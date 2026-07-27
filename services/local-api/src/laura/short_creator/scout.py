@@ -51,17 +51,22 @@ def _fallback(ranking: list[dict[str, Any]]) -> ScoutDecision:
 
 def _last_json_object(reply: str) -> dict[str, Any] | None:
     decoder = json.JSONDecoder()
-    last: dict[str, Any] | None = None
+    candidates: list[tuple[int, int, dict[str, Any]]] = []
     for position, character in enumerate(reply):
         if character != "{":
             continue
         try:
-            value, _ = decoder.raw_decode(reply[position:])
+            value, consumed = decoder.raw_decode(reply[position:])
         except json.JSONDecodeError:
             continue
         if isinstance(value, dict):
-            last = value
-    return last
+            candidates.append((position, position + consumed, value))
+    top_level = [
+        candidate
+        for candidate in candidates
+        if not any(start < candidate[0] < end for start, end, _ in candidates)
+    ]
+    return top_level[-1][2] if top_level else None
 
 
 def _known_scene_numbers(
@@ -193,12 +198,16 @@ def run_scout(
     if len(ranking) != len(ranking_value):
         raise ValueError("material ranking entries must be objects")
 
-    known_scenes = _known_scene_numbers(db, project_id, ranking)
-    task = _task_text(topic, ranking)
+    try:
+        known_scenes = _known_scene_numbers(db, project_id, ranking)
+        task = _task_text(topic, ranking)
+    except Exception as exc:
+        logger.warning("scout setup failed; using deterministic fallback: %s", exc)
+        return _fallback(ranking)
     invoke = runner or (lambda prompt: _default_runner(db, config, project_id, prompt))
     try:
         reply = invoke(task)
-    except (Exception, TimeoutError) as exc:
+    except Exception as exc:
         logger.warning("scout failed; using deterministic fallback: %s", exc)
         return _fallback(ranking)
     decision, error = _validate_reply(reply, known_scenes)
@@ -208,7 +217,7 @@ def run_scout(
     assert error is not None
     try:
         reply = invoke(_task_text(topic, ranking, error))
-    except (Exception, TimeoutError) as exc:
+    except Exception as exc:
         logger.warning("scout retry failed; using deterministic fallback: %s", exc)
         return _fallback(ranking)
     decision, _ = _validate_reply(reply, known_scenes)
