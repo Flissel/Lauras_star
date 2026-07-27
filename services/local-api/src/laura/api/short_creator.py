@@ -27,6 +27,9 @@ from ..jobs.runner import enqueue
 # Pure-pydantic leaf: safe at runtime even without the optional 'autoshort' extra, unlike
 # short_creator.board below.
 from ..short_creator.board_models import Format
+from ..short_creator.discovery import search_material
+from ..short_creator.providers import config_warnings, resolve_from_env
+from ..short_creator.scout import ScoutDecision, run_scout
 from ..util import new_id
 
 if TYPE_CHECKING:  # annotation only — never imported at runtime
@@ -40,6 +43,8 @@ router = APIRouter(tags=["short-creator"])
 class AutoShortRequest(BaseModel):
     topic: str = Field(min_length=1, max_length=2000)
     target_seconds: int = Field(default=60, gt=0, le=600)
+    format: Format = "insta"
+    language: str = Field(default="German", min_length=2, max_length=40)
 
 
 class ProductionCreateRequest(BaseModel):
@@ -288,6 +293,100 @@ def auto_short_stream(
 # --- v2 production session endpoint (Slice 4) -------------------------------------------------
 
 
+def _create_production_session(
+    db: Database,
+    asset_id: str,
+    *,
+    task: str,
+    target_seconds: float,
+    format: str,
+    language: str,
+) -> tuple[str, str]:
+    session_id = new_id()
+    created_utc = datetime.now(UTC).isoformat(timespec="seconds")
+    repos.create_production_session(
+        db, session_id=session_id, asset_id=asset_id, created_utc=created_utc
+    )
+    # LLM-driven production runs are expensive + non-idempotent — do not auto-retry.
+    job_id = enqueue(
+        db,
+        queue=queue_for("production.run"),
+        kind="production.run",
+        payload={
+            "asset_id": asset_id,
+            "session_id": session_id,
+            "task": task,
+            "target_seconds": target_seconds,
+            "format": format,
+            "language": language,
+        },
+        max_attempts=1,
+    )
+    repos.set_production_session_job(db, session_id, job_id)
+    return session_id, job_id
+
+
+@router.post("/projects/{project_id}/auto-short", status_code=status.HTTP_202_ACCEPTED)
+def create_project_auto_short(
+    project_id: str,
+    body: AutoShortRequest,
+    request: Request,
+    principal: Annotated[Principal, Depends(require_permission("timeline:edit"))],
+) -> dict[str, Any]:
+    """Scout project material for *topic* and enqueue a production session for the choice."""
+    db = _db(request)
+    if repos.get_project(db, project_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "project not found")
+    _require_autoshort()
+    _require_usable_agent_config()
+    material = search_material(db, project_id, body.topic)
+    if not material["ranking"]:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "reason": "no material found for topic",
+                "skipped": material["skipped"],
+                "source": material["source"],
+            },
+        )
+    decision: ScoutDecision = run_scout(
+        db,
+        resolve_from_env(),
+        project_id=project_id,
+        topic=body.topic,
+        material=material,
+    )
+    asset = repos.get_asset(db, decision["asset_id"])
+    assert asset is not None
+    chosen_material = next(
+        entry for entry in material["ranking"] if entry["asset_id"] == decision["asset_id"]
+    )
+    snippets = [str(hit["snippet"]) for hit in chosen_material["scene_hits"]]
+    task = (
+        f"{body.topic}\n\nMaterial scout: use asset '{asset['display_name']}'. "
+        f"Focus on scenes {', '.join(map(str, decision['scene_numbers']))} — "
+        f"transcript hits: {'; '.join(snippets)}. Scout rationale: {decision['rationale']}"
+    )
+    session_id, job_id = _create_production_session(
+        db,
+        decision["asset_id"],
+        task=task,
+        target_seconds=body.target_seconds,
+        format=body.format,
+        language=body.language,
+    )
+    return {
+        "session_id": session_id,
+        "job_id": job_id,
+        "asset_id": decision["asset_id"],
+        "scene_numbers": decision["scene_numbers"],
+        "rationale": decision["rationale"],
+        "fallback": decision["fallback"],
+        "ranking": material["ranking"],
+        "warnings": config_warnings(resolve_from_env()),
+    }
+
+
 @router.post("/assets/{asset_id}/production", status_code=status.HTTP_202_ACCEPTED)
 def create_production(
     asset_id: str,
@@ -305,28 +404,14 @@ def create_production(
     _get_asset_or_404(db, asset_id)
     _require_autoshort()
     _require_usable_agent_config()
-    session_id = new_id()
-    created_utc = datetime.now(UTC).isoformat(timespec="seconds")
-    repos.create_production_session(
-        db, session_id=session_id, asset_id=asset_id, created_utc=created_utc
-    )
-    # LLM-driven production runs are expensive + non-idempotent — do not auto-retry.
-    job_id = enqueue(
+    session_id, job_id = _create_production_session(
         db,
-        queue=queue_for("production.run"),
-        kind="production.run",
-        payload={
-            "asset_id": asset_id,
-            "session_id": session_id,
-            "task": body.task,
-            "target_seconds": body.target_seconds,
-            "format": body.format,
-            "language": body.language,
-        },
-        max_attempts=1,
+        asset_id,
+        task=body.task,
+        target_seconds=body.target_seconds,
+        format=body.format,
+        language=body.language,
     )
-    repos.set_production_session_job(db, session_id, job_id)
-    from ..short_creator.providers import config_warnings, resolve_from_env
 
     return {
         "session_id": session_id,
