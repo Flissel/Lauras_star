@@ -10,8 +10,8 @@ from typing import Any, TypedDict
 
 from ..db import repos
 from ..db.database import Database
+from . import context
 from . import discovery as discovery
-from . import production_tools
 from .providers import AgentConfig, build_model_client
 
 logger = logging.getLogger(__name__)
@@ -104,6 +104,9 @@ def _validate_reply(
     rationale = payload.get("rationale")
     if not isinstance(rationale, str):
         return None, "rationale must be a string"
+    rationale = rationale.strip()
+    if not rationale:
+        return None, "rationale must not be empty"
     return {
         "asset_id": asset_id,
         "scene_numbers": scene_numbers,
@@ -142,16 +145,36 @@ def _default_runner(db: Database, config: AgentConfig, project_id: str, task: st
 
     def get_scene_context(asset_id: str, scene_number: int) -> dict[str, Any]:
         """Get one rough-cut scene's source range and transcript context."""
-        resolved = production_tools._resolve_scene(db, asset_id, scene_number)
-        if resolved is None:
+        asset = repos.get_asset(db, asset_id)
+        if asset is None or str(asset["project_id"]) != project_id:
+            return {"ok": False, "reason": "asset is not in project"}
+        timeline = repos.get_asset_rough_cut(db, project_id, asset_id)
+        if timeline is None:
+            return {"ok": False, "reason": "no rough cut"}
+        scenes = repos.list_scenes(db, str(timeline["id"]))
+        scene = next(
+            (row for row in scenes if int(row["order_index"]) + 1 == int(scene_number)), None
+        )
+        if scene is None:
             return {"ok": False, "reason": "unknown scene"}
-        src_start, src_end_exclusive, text = resolved
+        clips = repos.list_timeline_clips(db, str(timeline["id"]))
+        ranges = context._scene_src_ranges(
+            clips,
+            seq_in=int(scene["seq_in_frame"]),
+            seq_out_exclusive=int(scene["seq_out_frame_exclusive"]),
+        )
+        if not ranges:
+            return {"ok": False, "reason": "unknown scene"}
+        run = repos.get_latest_analysis_run(db, asset_id)
+        segments = repos.get_transcript(db, asset_id, str(run["id"])) if run is not None else []
+        in_scene = context._segments_in_ranges(segments, ranges)
+        text = " ".join(str(segment.get("text") or "").strip() for segment in in_scene).strip()
         return {
             "ok": True,
             "asset_id": asset_id,
             "scene_number": scene_number,
-            "src_start_frame": src_start,
-            "src_end_frame_exclusive": src_end_exclusive,
+            "src_start_frame": ranges[0][0],
+            "src_end_frame_exclusive": ranges[-1][1],
             "text": text,
         }
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+import types
 from pathlib import Path
 from typing import Any
 
@@ -91,6 +93,115 @@ def _project(db: Database) -> str:
     )
 
 
+def _call_real_scene_context_tool(
+    db: Database,
+    project_id: str,
+    asset_id: str,
+    scene_number: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> dict[str, Any]:
+    captured: dict[str, Any] = {}
+
+    class FakeFunctionTool:
+        def __init__(self, func: Any, *, name: str = "", description: str = "") -> None:
+            self.func = func
+            self.name = name
+            self.description = description
+
+    class FakeAssistantAgent:
+        def __init__(
+            self,
+            *,
+            name: str,
+            model_client: object,
+            tools: list[FakeFunctionTool],
+            system_message: str,
+            max_tool_iterations: int,
+        ) -> None:
+            del name, model_client, system_message, max_tool_iterations
+            self.tools = tools
+
+        async def run(self, *, task: str) -> Any:
+            del task
+            tool = next(tool for tool in self.tools if tool.name == "get_scene_context")
+            captured["result"] = tool.func(asset_id=asset_id, scene_number=scene_number)
+            return types.SimpleNamespace(messages=[types.SimpleNamespace(content="tool called")])
+
+    core_tools = types.ModuleType("autogen_core.tools")
+    core_tools.FunctionTool = FakeFunctionTool  # type: ignore[attr-defined]
+    agentchat_agents = types.ModuleType("autogen_agentchat.agents")
+    agentchat_agents.AssistantAgent = FakeAssistantAgent  # type: ignore[attr-defined]
+    for name, module in {
+        "autogen_core": types.ModuleType("autogen_core"),
+        "autogen_core.tools": core_tools,
+        "autogen_agentchat": types.ModuleType("autogen_agentchat"),
+        "autogen_agentchat.agents": agentchat_agents,
+    }.items():
+        monkeypatch.setitem(sys.modules, name, module)
+    monkeypatch.setattr(scout, "build_model_client", lambda config, role: object())
+
+    scout._default_runner(db, resolve_from_env({}), project_id, "inspect scene")
+
+    result = captured["result"]
+    assert isinstance(result, dict)
+    return result
+
+
+def test_scene_context_tool_rejects_asset_from_another_project(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = _db(tmp_path)
+    requested_project_id = _project(db)
+    other_project_id = _project(db)
+    other_asset_id = _seed_asset_with_scenes(db, other_project_id, "other.mp4")
+
+    result = _call_real_scene_context_tool(
+        db, requested_project_id, other_asset_id, 1, monkeypatch
+    )
+
+    assert result == {"ok": False, "reason": "asset is not in project"}
+
+
+def test_scene_context_tool_does_not_create_missing_rough_cut(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = _db(tmp_path)
+    project_id = _project(db)
+    asset = repos.create_asset(
+        db,
+        project_id=project_id,
+        type="video",
+        display_name="raw.mp4",
+        source_path="/tmp/raw.mp4",
+    )
+
+    result = _call_real_scene_context_tool(
+        db, project_id, str(asset["id"]), 1, monkeypatch
+    )
+
+    assert result == {"ok": False, "reason": "no rough cut"}
+    assert repos.get_asset_rough_cut(db, project_id, str(asset["id"])) is None
+
+
+def test_scene_context_tool_preserves_same_project_scene_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = _db(tmp_path)
+    project_id = _project(db)
+    asset_id = _seed_asset_with_scenes(db, project_id, "mission.mp4")
+
+    result = _call_real_scene_context_tool(db, project_id, asset_id, 1, monkeypatch)
+
+    assert result == {
+        "ok": True,
+        "asset_id": asset_id,
+        "scene_number": 1,
+        "src_start_frame": 0,
+        "src_end_frame_exclusive": 300,
+        "text": "mission briefing",
+    }
+
+
 def test_valid_reply_is_adopted_and_task_embeds_ranked_material(tmp_path: Path) -> None:
     db = _db(tmp_path)
     project_id = _project(db)
@@ -175,6 +286,63 @@ def test_unknown_asset_retries_once_with_validation_error(tmp_path: Path) -> Non
     assert len(tasks) == 2
     assert "Validation error:" in tasks[1]
     assert "asset_id is not in the ranking" in tasks[1]
+
+
+def test_whitespace_rationale_retries_once_then_uses_deterministic_fallback(
+    tmp_path: Path,
+) -> None:
+    db = _db(tmp_path)
+    project_id = _project(db)
+    asset_id = _seed_asset_with_scenes(db, project_id, "mission.mp4")
+    tasks: list[str] = []
+
+    def runner(task: str) -> str:
+        tasks.append(task)
+        return (
+            '{"asset_id": "'
+            + asset_id
+            + '", "scene_numbers": [1], "rationale": "  \\t  "}'
+        )
+
+    decision = scout.run_scout(
+        db,
+        resolve_from_env({}),
+        project_id=project_id,
+        topic="mission",
+        material=_material(asset_id),
+        runner=runner,
+    )
+
+    assert decision == {
+        "asset_id": asset_id,
+        "scene_numbers": [1],
+        "rationale": "automatic fallback: top search score",
+        "fallback": True,
+    }
+    assert len(tasks) == 2
+    assert "rationale must not be empty" in tasks[1]
+
+
+def test_valid_rationale_is_stripped(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    project_id = _project(db)
+    asset_id = _seed_asset_with_scenes(db, project_id, "mission.mp4")
+
+    decision = scout.run_scout(
+        db,
+        resolve_from_env({}),
+        project_id=project_id,
+        topic="mission",
+        material=_material(asset_id),
+        runner=lambda task: (
+            '{"asset_id": "'
+            + asset_id
+            + '", "scene_numbers": [1], "rationale": "  strongest opening  "}'
+        ),
+    )
+
+    assert decision["rationale"] == "strongest opening"
+    assert decision["fallback"] is False
 
 
 def test_invalid_replies_twice_use_deterministic_fallback(tmp_path: Path) -> None:

@@ -63,8 +63,8 @@ def _scene_ranges(
             seq_in=int(scene["seq_in_frame"]),
             seq_out_exclusive=int(scene["seq_out_frame_exclusive"]),
         )
-        if ranges:
-            resolved.append((int(scene["order_index"]) + 1, ranges[0][0], ranges[-1][1]))
+        scene_number = int(scene["order_index"]) + 1
+        resolved.extend((scene_number, low, high) for low, high in ranges)
     return (resolved, None) if resolved else ([], "no scenes")
 
 

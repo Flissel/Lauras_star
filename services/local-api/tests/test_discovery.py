@@ -110,6 +110,79 @@ def test_lexical_ranking_maps_hits_to_scenes_and_ranks_assets(
     assert out["skipped"] == []
 
 
+def test_scene_mapping_excludes_transcript_in_gap_between_disjoint_source_ranges(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    monkeypatch.setattr(discovery, "get_index", lambda: None)
+    db = _db(tmp_path)
+    project = repos.create_project(
+        db, name="p", rate_num=FPS, rate_den=1, drop_frame=False, workspace_root="/tmp/p"
+    )
+    asset = repos.create_asset(
+        db,
+        project_id=project["id"],
+        type="video",
+        display_name="disjoint.mp4",
+        source_path="/tmp/disjoint.mp4",
+    )
+    run = repos.create_analysis_run(
+        db, asset_id=asset["id"], pipeline_version="t", config={}
+    )
+    repos.start_analysis_run(db, run["id"])
+    for start, end, text in (
+        (10, 20, "mission valid opening"),
+        (150, 160, "mission gap must be excluded"),
+        (310, 320, "mission valid closing"),
+    ):
+        repos.insert_segment_with_words(
+            db,
+            asset_id=asset["id"],
+            run_id=run["id"],
+            speaker_id=None,
+            segment={
+                "start_sample": start * 1600,
+                "end_sample": end * 1600,
+                "start_frame": start,
+                "end_frame": end,
+                "text": text,
+                "confidence": 1.0,
+            },
+            words=[],
+        )
+    repos.finish_analysis_run(db, run["id"], status="succeeded", diagnostics={})
+    timeline = repos.create_timeline(
+        db,
+        project_id=project["id"],
+        name="Rough Cut",
+        kind="rough_cut",
+        created_from=asset["id"],
+    )
+    for src_in, src_out, seq_in, seq_out in (
+        (0, 100, 0, 100),
+        (300, 400, 100, 200),
+    ):
+        repos.add_timeline_clip(
+            db,
+            timeline_id=timeline["id"],
+            asset_id=asset["id"],
+            src_in_frame=src_in,
+            src_out_frame_exclusive=src_out,
+            seq_in_frame=seq_in,
+            seq_out_frame_exclusive=seq_out,
+        )
+    repos.replace_scenes(db, project["id"], timeline["id"], [(0, 200)])
+
+    out = discovery.search_material(db, project["id"], "mission")
+
+    assert len(out["ranking"]) == 1
+    ranked = out["ranking"][0]
+    assert ranked["score"] == 2.0
+    assert [hit["snippet"] for hit in ranked["scene_hits"]] == [
+        "mission valid opening",
+        "mission valid closing",
+    ]
+
+
 def test_asset_without_rough_cut_is_skipped_not_created(tmp_path: Path, monkeypatch: Any) -> None:
     monkeypatch.setattr(discovery, "get_index", lambda: None)
     db = _db(tmp_path)
