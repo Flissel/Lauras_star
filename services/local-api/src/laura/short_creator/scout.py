@@ -10,7 +10,8 @@ from typing import Any, TypedDict
 
 from ..db import repos
 from ..db.database import Database
-from . import discovery, production_tools
+from . import discovery as discovery
+from . import production_tools
 from .providers import AgentConfig, build_model_client
 
 logger = logging.getLogger(__name__)
