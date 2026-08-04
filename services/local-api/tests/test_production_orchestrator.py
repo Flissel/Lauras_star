@@ -1117,3 +1117,73 @@ def test_parse_outcome_empty_result_gives_empty_summary(tmp_path: Path) -> None:
     outcome = _parse_outcome(board, SimpleNamespace(messages=[]), stage="A")
 
     assert outcome.summary == ""
+
+
+# --- follow-up guards (live finding 2026-08-04) --------------------------------------------------
+# Live session 6021d069: the user asked for a reframe; run 170643Z's MagenticOne orchestrator
+# declared success with ZERO tool calls, and the render-cycle cap silently ate the re-render.
+# Two guards: (1) a follow-up run that finishes without a single tool call is a hard_fail (so
+# the ladder escalates to Stage B instead of reporting a success that changed nothing); (2) an
+# explicit user follow-up raises the render cap by one via deps.max_render_cycles.
+
+
+def test_parse_outcome_zero_tool_calls_on_follow_up_hard_fails(tmp_path: Path) -> None:
+    from laura.short_creator.production_orchestrator import _parse_outcome
+
+    board = _make_board(tmp_path)
+    result = SimpleNamespace(messages=[_SummaryMsg("All done, everything looks great.")])
+
+    outcome = _parse_outcome(
+        board, result, stage="A", tool_calls=0, require_tool_call=True
+    )
+
+    assert outcome.status == "hard_fail"
+    assert "without a single tool call" in outcome.summary
+    assert "All done" in outcome.summary  # the team's own claim stays inspectable
+
+
+def test_parse_outcome_with_tool_calls_on_follow_up_stays_ok(tmp_path: Path) -> None:
+    from laura.short_creator.production_orchestrator import _parse_outcome
+
+    board = _make_board(tmp_path)
+    result = SimpleNamespace(messages=[_SummaryMsg("rebuilt and re-rendered")])
+
+    outcome = _parse_outcome(
+        board, result, stage="A", tool_calls=3, require_tool_call=True
+    )
+
+    assert outcome.status == "ok"
+    assert outcome.summary == "rebuilt and re-rendered"
+
+
+def test_parse_outcome_zero_tool_calls_without_requirement_stays_ok(tmp_path: Path) -> None:
+    """A plain (non-message) run may legitimately end without tool calls — e.g. the full-board
+    resume where the team only confirms; the guard is scoped to follow-up runs only."""
+    from laura.short_creator.production_orchestrator import _parse_outcome
+
+    board = _make_board(tmp_path)
+    result = SimpleNamespace(messages=[_SummaryMsg("board already complete")])
+
+    outcome = _parse_outcome(board, result, stage="A", tool_calls=0)
+
+    assert outcome.status == "ok"
+
+
+def test_deps_for_run_raises_render_cap_only_for_message_runs(tmp_path: Path) -> None:
+    from laura.short_creator.production_orchestrator import _deps_for_run
+    from laura.short_creator.production_tools import ProductionDeps, follow_up_render_cap
+
+    board = _make_board(tmp_path)
+    base = ProductionDeps()
+
+    assert _deps_for_run(base, board, None) is base, "a plain resume must stay untouched"
+    assert _deps_for_run(None, board, None) is None
+
+    raised = _deps_for_run(base, board, "zeig das volle Bild, kein enger Zoom")
+    assert raised is not None
+    assert raised is not base, "the caller's deps object must not be mutated"
+    assert raised.max_render_cycles == follow_up_render_cap(board)
+
+    from_none = _deps_for_run(None, board, "render jetzt")
+    assert from_none is not None
+    assert from_none.max_render_cycles == follow_up_render_cap(board)

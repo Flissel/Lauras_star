@@ -1165,3 +1165,132 @@ def test_build_cutlist_tool_description_teaches_offset_only_window_contract(
 
     assert "base-duration cap" not in description
     assert "never from the window's duration" in description
+
+
+# --- the zoom lever (live finding 2026-08-04) ----------------------------------------------------
+# The user asked for the full frame ("zeig das volle Bild, kein enger Zoom"); rois derive from
+# the STORYLINE's window references, and three follow-up runs failed to re-save the storyline —
+# twice rebuilding the cutlist from the unchanged storyline. The workaround was stripping rois
+# out of cutlist.json by hand. zoom="off" is that workaround as a first-class, one-call lever.
+
+
+def test_build_cutlist_zoom_off_drops_all_rois_and_zoom(tmp_path: Path) -> None:
+    """zoom="off": EVERY segment comes out roi-less and unzoomed, regardless of the storyline's
+    window references — while the cut itself (window offsets, durations) stays exactly the one
+    zoom="auto" builds. Same fixture numbers as
+    ``test_build_cutlist_deterministic_segments_and_zoom`` (which pins the auto behaviour)."""
+    db, asset_id = _seed_two_scenes(tmp_path)
+    board = _board(tmp_path, asset_id)
+    _review(
+        board,
+        1,
+        best_window=BestWindow(offset_s=1.0, duration_s=3.0),
+        roi=Roi(x=0.1, y=0.1, w=0.2, h=0.2),
+    )
+    _review(
+        board,
+        2,
+        best_window=BestWindow(offset_s=0.0, duration_s=3.0),
+        roi=Roi(x=0.3, y=0.3, w=0.2, h=0.2),
+    )
+    board.save("storyline", _storyline(scene_numbers=[1, 2], target_seconds=4.0))
+    board.save("script", _script())
+    _save_voice(
+        board,
+        tmp_path,
+        words=[
+            {"text": "Stopp", "start_s": 0.2, "end_s": 0.45},
+            {"text": "dein", "start_s": 0.5, "end_s": 0.75},
+            {"text": "Team", "start_s": 0.9, "end_s": 1.2},
+            {"text": "Ein", "start_s": 2.5, "end_s": 2.75},
+            {"text": "Klick", "start_s": 2.8, "end_s": 3.0},
+            {"text": "genügt", "start_s": 3.1, "end_s": 3.4},
+        ],
+    )
+    specs = {s.name: s for s in build_production_tool_specs(db, board, asset_id=asset_id)}
+
+    out = specs["build_cutlist"].func(zoom="off")
+
+    assert out["ok"] is True
+    assert out["segments"] == 2
+    assert out["with_zoom"] == 0
+    assert "zoom" in str(out.get("note", "")).lower()  # the override is named in the reply
+
+    cutlist = board.load("cutlist")
+    assert isinstance(cutlist, Cutlist)
+    seg0, seg1 = cutlist.segments
+    assert seg0.roi is None and seg0.zoom_start_s is None
+    assert seg1.roi is None and seg1.zoom_start_s is None
+    # The CUT is untouched — same frames as the zoom="auto" run over these exact numbers.
+    assert (seg0.start_frame, seg0.end_frame_exclusive) == (30, 90)
+    assert (seg1.start_frame, seg1.end_frame_exclusive) == (300, 360)
+
+
+def test_build_cutlist_zoom_off_overrides_window_refs(tmp_path: Path) -> None:
+    """The live failure mode exactly: the storyline references a review window WITH a roi, and
+    zoom="off" must still drop it — the whole point is that the storyline does not need to be
+    re-saved without its window refs."""
+    db, asset_id = _seed_two_scenes(tmp_path)
+    board = _board(tmp_path, asset_id)
+    w0 = BestWindow(offset_s=0.0, duration_s=2.0)
+    w1 = BestWindow(offset_s=5.0, duration_s=3.0, roi=Roi(x=0.3, y=0.3, w=0.2, h=0.2))
+    _review(board, 1, best_window=w0, windows=[w0, w1], roi=Roi(x=0.1, y=0.1, w=0.2, h=0.2))
+    board.save(
+        "storyline",
+        Storyline(
+            red_thread="rt",
+            arc=[
+                Chapter(
+                    chapter=1,
+                    role="hook",
+                    message="m",
+                    scene_numbers=[SceneWindowRef(scene=1, window=1)],
+                    target_seconds=4.0,
+                )
+            ],
+        ),
+    )
+    board.save(
+        "script",
+        Script(
+            language="de", lines=[ScriptLine(chapter=1, scene_number=1, text="Stopp dein Team")]
+        ),
+    )
+    _save_voice(board, tmp_path, words=[])
+    specs = {s.name: s for s in build_production_tool_specs(db, board, asset_id=asset_id)}
+
+    out = specs["build_cutlist"].func(zoom="off")
+
+    assert out["ok"] is True
+    cutlist = board.load("cutlist")
+    assert isinstance(cutlist, Cutlist)
+    seg = cutlist.segments[0]
+    assert seg.roi is None and seg.zoom_start_s is None
+    # The referenced window still decides WHERE the segment starts — only the crop is dropped.
+    assert seg.start_frame == 150
+
+
+def test_build_cutlist_rejects_unknown_zoom_value(tmp_path: Path) -> None:
+    db, asset_id = _seed_two_scenes(tmp_path)
+    board = _board(tmp_path, asset_id)
+    specs = {s.name: s for s in build_production_tool_specs(db, board, asset_id=asset_id)}
+
+    out = specs["build_cutlist"].func(zoom="wide")
+
+    assert out["ok"] is False
+    assert '"auto"' in out["reason"] and '"off"' in out["reason"]
+    assert board.load("cutlist") is None
+
+
+def test_build_cutlist_tool_description_documents_the_zoom_off_lever(tmp_path: Path) -> None:
+    """The team can only comply with 'zeig das volle Bild' in one call if the docstring (the
+    LLM-facing tool description) says so — three live follow-up runs failed without it."""
+    db, asset_id = _seed_two_scenes(tmp_path)
+    board = _board(tmp_path, asset_id)
+    specs = {s.name: s for s in build_production_tool_specs(db, board, asset_id=asset_id)}
+
+    description = specs["build_cutlist"].description
+
+    assert 'zoom="off"' in description
+    assert "regardless of the storyline" in description
+    assert "full frame" in description

@@ -495,6 +495,69 @@ def test_the_cap_says_so_when_the_shipped_cut_no_longer_speaks_the_script(
     assert "earlier script" in capped["note"]
 
 
+# --- the follow-up render allowance (live finding 2026-08-04) ------------------------------------
+# The user explicitly asked for a reframe ("zeig das volle Bild") after the cap was already
+# reached, and _MAX_RENDER_CYCLES silently shipped the old cut instead — an operator-requested
+# change must not be eaten by a runaway-loop backstop. run_production raises the cap by ONE
+# render per explicit user follow-up (deps.max_render_cycles = follow_up_render_cap(board)).
+
+
+def test_follow_up_render_cap_values(tmp_path: Path) -> None:
+    """Pure cap arithmetic: never below _MAX_RENDER_CYCLES (a follow-up on a board with budget
+    left grants nothing extra), and exactly one render above what has already been spent."""
+    from laura.short_creator.production_tools import follow_up_render_cap
+
+    db, asset_id = _seed_asset(tmp_path)
+    board = _board(tmp_path, asset_id)
+
+    assert follow_up_render_cap(board) == _MAX_RENDER_CYCLES  # no renders yet -> plain cap
+
+    for i in range(_MAX_RENDER_CYCLES):
+        # Distinct export ids: board.save short-circuits an IDENTICAL re-save into a no-op,
+        # which would leave the version count at 1 instead of really spending the cap.
+        board.save(
+            "render_report",
+            RenderReport(export_id=f"e{i}", video_s=4.0, width=1080, height=1920, checks=[]),
+        )
+    assert follow_up_render_cap(board) == _MAX_RENDER_CYCLES + 1  # spent cap -> one more
+
+
+def test_follow_up_cap_grants_exactly_one_more_render(tmp_path: Path) -> None:
+    """With deps.max_render_cycles raised, render_production really renders ONE more time past
+    the exhausted default cap — and the raised cap binds again right after."""
+    from laura.short_creator.production_tools import follow_up_render_cap
+
+    db, asset_id, board = _build_board_to_cutlist(tmp_path, scene2_roi=None, voice_s=3.4)
+    fake = _FakeRenderSegments(status="ready")
+    deps = ProductionDeps(render_segments=fake)
+    specs = {
+        s.name: s for s in build_production_tool_specs(db, board, asset_id=asset_id, deps=deps)
+    }
+    for _ in range(_MAX_RENDER_CYCLES):
+        assert specs["render_production"].func()["ok"] is True
+    assert specs["render_production"].func()["final"] is True  # the default cap is exhausted
+    assert len(fake.calls) == _MAX_RENDER_CYCLES
+
+    raised = ProductionDeps(
+        render_segments=fake, max_render_cycles=follow_up_render_cap(board)
+    )
+    raised_specs = {
+        s.name: s
+        for s in build_production_tool_specs(db, board, asset_id=asset_id, deps=raised)
+    }
+
+    out = raised_specs["render_production"].func()
+
+    assert out["ok"] is True
+    assert out.get("final") is not True, "the operator-requested render really happened"
+    assert len(fake.calls) == _MAX_RENDER_CYCLES + 1
+
+    again = raised_specs["render_production"].func()
+    assert again["final"] is True, "one extra render per follow-up — then the cap holds again"
+    assert len(fake.calls) == _MAX_RENDER_CYCLES + 1
+    assert str(_MAX_RENDER_CYCLES + 1) in again["note"]  # the note names the RAISED cap
+
+
 def test_render_and_voice_and_sheet_stamp_their_parents(tmp_path: Path) -> None:
     from laura.short_creator.board_models import content_hash
 

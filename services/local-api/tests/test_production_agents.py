@@ -236,6 +236,18 @@ def test_prompts_carry_contracts() -> None:
     assert "charter" in by_name["qa_reviewer"].system_message.lower()
 
 
+def test_coding_agent_knows_the_zoom_off_lever() -> None:
+    """Live finding 2026-08-04: 'zeig das volle Bild, kein enger Zoom' was not executable —
+    the team kept rebuilding the cutlist from the unchanged storyline because nothing told it
+    the framing lever is build_cutlist's own zoom parameter, not a storyline re-save."""
+    by_name = {s.name: s for s in production_agents.production_agent_specs()}
+    msg = by_name["coding_agent"].system_message
+
+    assert 'zoom="off"' in msg
+    assert "full frame" in msg.lower()
+    assert "storyline" in msg  # ... does NOT need a re-save for a framing change
+
+
 # --- build_production_team ---------------------------------------------------------------------
 
 

@@ -45,7 +45,10 @@ frame-accurate ``Cutlist``: one ``CutSegment`` per scene entry in arc order, cut
 window the entry references (offset, per-window roi — duration is budget-driven, never the
 window's own duration), clamped inside its own source range, with an optional zoom timed to when
 the scene's script line is actually spoken (the voice sidecar's word ``start_s``, via
-:func:`line_starts`, offset by ``transition_lead_s``).
+:func:`line_starts`, offset by ``transition_lead_s``). ``zoom="off"`` is the user's framing
+lever: it drops every roi and ``zoom_start_s`` regardless of the storyline's window references
+(live 2026-08-04: "zeig das volle Bild" was otherwise not executable — the team would have had
+to re-save the storyline without its window refs, and failed to in three follow-up runs).
 Segment durations are coupled to that same sidecar: :func:`chapter_audio_windows` tiles the
 voice track into per-chapter windows (boundaries midway between adjacent chapters' words, the
 last chapter running to voice end + a short tail) and ``_scale_chapter_durations`` rescales each
@@ -222,6 +225,8 @@ _VOICE_FIT_TOLERANCE_S = 0.05
 # render plus one revise round is the charter; past that, render_production ships the last cut
 # instead of spending another render, and the turn budget stops the rest. A prompt saying "one
 # revise round" did not hold — gpt-5-mini rendered four times, gpt-5.5 more.
+# The cap guards against the TEAM's loops, not against the USER: an explicit follow-up message
+# raises it via ProductionDeps.max_render_cycles = follow_up_render_cap(board).
 _MAX_RENDER_CYCLES = 2
 
 
@@ -254,6 +259,10 @@ class ProductionDeps:
     frame_extract: Callable[[Database, str, list[int]], list[bytes]] | None = None
     voice_backend: VoiceBackend | None = None  # used from Task 5 on
     render_segments: RenderSegmentsFn | None = None  # used from Task 6 on
+    # render_production's revision cap (None = _MAX_RENDER_CYCLES). run_production raises it to
+    # follow_up_render_cap(board) for a run carrying an explicit user follow-up message — the
+    # cap exists to stop the team's own revision loops, never an operator-requested change.
+    max_render_cycles: int | None = None
 
 
 # --- reply parsing + clamping (pure) ------------------------------------------------------------
@@ -1070,6 +1079,20 @@ def _renders_so_far(board: Board) -> int:
     return max([0, current_v, *archived])
 
 
+def follow_up_render_cap(board: Board) -> int:
+    """The render-cycle cap for a run carrying an explicit user follow-up message.
+
+    ``_MAX_RENDER_CYCLES`` is a runaway-loop backstop against the TEAM re-rendering on its own
+    judgment; an operator-requested change is not a runaway loop. Live 2026-08-04: the user
+    asked for a reframe after the cap was spent, and the cap silently shipped the old cut.
+    One render above what has already been spent — never below the plain cap, so a board with
+    render budget left gains nothing extra. Wired in by ``run_production`` through
+    ``ProductionDeps.max_render_cycles``, so each follow-up run grants at most ONE re-render
+    and the backstop holds again right after.
+    """
+    return max(_MAX_RENDER_CYCLES, _renders_so_far(board) + 1)
+
+
 def _storyline_material(
     db: Database, board: Board, asset_id: str, storyline: Storyline
 ) -> tuple[dict[int, float], list[int], int]:
@@ -1714,7 +1737,7 @@ def build_production_tool_specs(
         except Exception as exc:  # tool must never kill the agent loop
             return {"ok": False, "reason": str(exc)[:200]}
 
-    def build_cutlist(transition_lead_s: float = 0.4) -> dict[str, Any]:
+    def build_cutlist(transition_lead_s: float = 0.4, zoom: str = "auto") -> dict[str, Any]:
         """Deterministically derive a frame-accurate cutlist from storyline + script + voice:
         one CutSegment per scene entry in arc order (chapter, then that chapter's
         scene_numbers order). An entry that references a review window ({"scene": N,
@@ -1731,11 +1754,19 @@ def build_production_tool_specs(
         past its scene's end. A chapter the sidecar doesn't cover (or a missing sidecar)
         falls back to the plain target_seconds budget. An optional zoom-in is timed to when
         the scene's script line is actually spoken (word starts, offset ahead by
-        transition_lead_s so the zoom lands just before the word lands, not on it). Requires
+        transition_lead_s so the zoom lands just before the word lands, not on it).
+        zoom is the FRAMING LEVER: "auto" (default) keeps each segment's window/review roi
+        and the spoken-word zoom timing; zoom="off" drops EVERY roi and zoom_start_s
+        regardless of the storyline's window references, so the render shows the full frame
+        (blur-filled) — when the user asks for the full picture / no tight zoom, call
+        build_cutlist(zoom="off") directly; the storyline does NOT need to be re-saved for a
+        framing change. Any other zoom value is rejected. Requires
         save_storyline, save_script_chapter and synthesize_script_voice to have all run first
         — reports which one is missing instead of raising, and rejects a storyline window
         reference the scene's review does not have (fix the storyline or re-review)."""
         try:
+            if zoom not in ("auto", "off"):
+                return {"ok": False, "reason": 'zoom must be "auto" or "off"'}
             storyline = board.load("storyline")
             if not isinstance(storyline, Storyline):
                 return {
@@ -1824,6 +1855,9 @@ def build_production_tool_specs(
                         )
                         roi = None
 
+                    if zoom == "off":  # framing lever: full frame, window offsets kept
+                        roi = None
+
                     resolved_scenes.append((scene_number, src_start, src_end, window, roi))
                     base_durations.append(
                         _segment_duration_s(
@@ -1891,12 +1925,18 @@ def build_production_tool_specs(
             )
             total_seconds = sum((s.end_frame_exclusive - s.start_frame) / fps for s in segments)
             with_zoom = sum(1 for s in segments if s.zoom_start_s is not None)
-            return {
+            reply: dict[str, Any] = {
                 "ok": True,
                 "segments": len(segments),
                 "total_seconds": round(total_seconds, 3),
                 "with_zoom": with_zoom,
             }
+            if zoom == "off":
+                reply["note"] = (
+                    "zoom off: every roi and zoom_start_s dropped — the render shows the "
+                    "full frame"
+                )
+            return reply
         except Exception as exc:  # tool must never kill the agent loop
             return {"ok": False, "reason": str(exc)[:200]}
 
@@ -2056,11 +2096,16 @@ def build_production_tool_specs(
                     "reason": "no storyline on the board; run save_storyline first",
                 }
 
-            # Revision cap: once this production has rendered _MAX_RENDER_CYCLES times, do not
-            # spend another render. Ship the last one instead. An upstream re-save may have
+            # Revision cap: once this production has rendered render_cap times, do not spend
+            # another render. Ship the last one instead. An upstream re-save may have
             # invalidated the current render_report — restore the newest archived one so the
-            # finished export is still reported.
-            if _renders_so_far(board) >= _MAX_RENDER_CYCLES:
+            # finished export is still reported. deps raise the cap for an explicit user
+            # follow-up (see follow_up_render_cap) — an operator-requested reframe must not
+            # be eaten by the team's runaway-loop backstop.
+            render_cap = (
+                d.max_render_cycles if d.max_render_cycles is not None else _MAX_RENDER_CYCLES
+            )
+            if _renders_so_far(board) >= render_cap:
                 last = board.load("render_report")
                 if not isinstance(last, RenderReport):
                     newest = max(board.versions("render_report"), default=0)
@@ -2076,7 +2121,7 @@ def build_production_tool_specs(
                     current_hash = script_hash(_lines_in_storyline_order(script, storyline))
                     stale = bool(last.script_hash) and last.script_hash != current_hash
                     note = (
-                        f"revision limit reached ({_MAX_RENDER_CYCLES} renders); shipping "
+                        f"revision limit reached ({render_cap} renders); shipping "
                         "this cut instead of rendering again"
                     )
                     if stale:

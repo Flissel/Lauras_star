@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -34,7 +35,7 @@ from .board import Board
 from .board_models import BoardMeta, Format, QaReport, RenderReport, canvas_for
 from .orchestrator import ExecuteFn, StageOutcome, Status, TeamKind, _safe_execute
 from .production_agents import build_production_team
-from .production_tools import ProductionDeps
+from .production_tools import ProductionDeps, follow_up_render_cap
 from .providers import AgentConfig, Stage, config_warnings
 
 logger = logging.getLogger(__name__)
@@ -227,7 +228,35 @@ def _export_id_of(board: Board) -> str | None:
     return render_report.export_id if isinstance(render_report, RenderReport) else None
 
 
-def _parse_outcome(board: Board, result: Any, *, stage: Stage) -> StageOutcome:
+def _deps_for_run(
+    deps: ProductionDeps | None, board: Board, message: str | None
+) -> ProductionDeps | None:
+    """The deps a run actually executes with: unchanged for a plain resume/restart, render cap
+    raised for an explicit user follow-up.
+
+    ``_MAX_RENDER_CYCLES`` exists to stop the TEAM's own revision loops; a user asking for a
+    change is not one. Live 2026-08-04: the user asked for a reframe against a board whose cap
+    was already spent, and render_production silently shipped the old cut. A message run gets
+    ``max_render_cycles = follow_up_render_cap(board)`` — one render above what has already
+    been spent, so each follow-up grants at most one re-render and the backstop holds again
+    right after. The caller's deps object is never mutated (``dataclasses.replace``).
+    """
+    if message is None:
+        return deps
+    cap = follow_up_render_cap(board)
+    if deps is None:
+        return ProductionDeps(max_render_cycles=cap)
+    return replace(deps, max_render_cycles=cap)
+
+
+def _parse_outcome(
+    board: Board,
+    result: Any,
+    *,
+    stage: Stage,
+    tool_calls: int = 0,
+    require_tool_call: bool = False,
+) -> StageOutcome:
     """Read a finished production-team run into an outcome.
 
     ``weak`` comes from the board's QA verdict, not message scanning: v2's QA reviewer writes a
@@ -238,6 +267,13 @@ def _parse_outcome(board: Board, result: Any, *, stage: Stage) -> StageOutcome:
     ``summary`` is the LAST non-empty message — the team's final answer. Concatenating all
     messages and truncating put ``messages[0]`` (the task text) into every summary
     (live finding 2026-07-20: three runs in a row "summarized" themselves with their own task).
+
+    ``require_tool_call`` guards a follow-up run: a user message is by definition a request for
+    work, and a run that never touched a single tool did none. Live 2026-08-04 (session
+    6021d069, run 170643Z): the MagenticOne orchestrator answered a reframe request by
+    declaring success with ZERO tool calls. That is a ``hard_fail`` — the ladder escalates to
+    Stage B instead of reporting a success that changed nothing — with the team's own closing
+    claim kept in the summary so the false success stays inspectable.
     """
     summary = ""
     for msg in reversed(getattr(result, "messages", None) or []):
@@ -246,6 +282,17 @@ def _parse_outcome(board: Board, result: Any, *, stage: Stage) -> StageOutcome:
         if text:
             summary = text[:2000]
             break
+    if require_tool_call and tool_calls == 0:
+        return StageOutcome(
+            status="hard_fail",
+            weak=_qa_weak(board),
+            summary=(
+                "the team finished a user follow-up without a single tool call — nothing was "
+                f"done; its closing message: {summary}"
+            )[:2000],
+            team="magentic",
+            stage=stage,
+        )
     return StageOutcome(
         status="ok", weak=_qa_weak(board), summary=summary, team="magentic", stage=stage
     )
@@ -256,6 +303,8 @@ def _make_default_execute(
     asset_id: str,
     deps: ProductionDeps | None,
     event_sink: Callable[[dict[str, Any]], None] | None = None,
+    *,
+    require_tool_call: bool = False,
 ) -> ExecuteFn:
     """The default ``ExecuteFn``: lazily builds and runs the real production team.
 
@@ -268,6 +317,10 @@ def _make_default_execute(
     and saved nothing, and the log held exactly two lines — meta and done; which tool was
     called and what it refused was unknowable. Observability only: a missing or crashing sink
     never affects the run.
+
+    ``tool_call`` events are additionally COUNTED (sink or no sink) and handed to
+    :func:`_parse_outcome`, which — with *require_tool_call* set for a follow-up run — turns a
+    zero-tool-call finish into a ``hard_fail`` instead of a false success.
     """
 
     def execute(
@@ -277,33 +330,43 @@ def _make_default_execute(
 
         from .stream import _map_event
 
-        async def _run() -> Any:
+        async def _run() -> tuple[Any, int]:
             team = build_production_team(
                 db, board, config, asset_id=asset_id, stage=stage, deps=deps
             )
             final: Any = None
+            n_tool_calls = 0
             async for raw in team.run_stream(task=task):
                 if type(raw).__name__ == "TaskResult":
                     final = raw
                     continue
+                mapped = _map_event(raw, "magentic")
+                if mapped is None:
+                    continue
+                if mapped.get("type") == "tool_call":
+                    n_tool_calls += 1
                 if event_sink is None:
                     continue
-                mapped = _map_event(raw, "magentic")
-                if mapped is not None:
-                    try:
-                        event_sink(mapped)
-                    except Exception:  # noqa: BLE001 — logging must never fail the film
-                        logger.warning("production event sink failed; continuing")
-            return final
+                try:
+                    event_sink(mapped)
+                except Exception:  # noqa: BLE001 — logging must never fail the film
+                    logger.warning("production event sink failed; continuing")
+            return final, n_tool_calls
 
         try:
-            result = asyncio.run(_run())
+            result, n_tool_calls = asyncio.run(_run())
         except Exception as exc:
             logger.warning("magentic production team failed at stage %s: %s", stage, exc)
             return StageOutcome(
                 status="hard_fail", weak=False, summary=str(exc), team="magentic", stage=stage
             )
-        return _parse_outcome(board, result, stage=stage)
+        return _parse_outcome(
+            board,
+            result,
+            stage=stage,
+            tool_calls=n_tool_calls,
+            require_tool_call=require_tool_call,
+        )
 
     return execute
 
@@ -472,8 +535,13 @@ def run_production(
     task_text = build_production_task(
         db, board, asset_id=asset_id, task=task, target_seconds=target_seconds, message=message
     )
+    # A follow-up message run gets two guards the plain resume does not (live 2026-08-04): the
+    # render-cycle cap is raised by one so an operator-requested re-render is not eaten by the
+    # team's runaway-loop backstop, and a run that finishes without a single tool call is a
+    # hard_fail instead of a false success.
+    run_deps = _deps_for_run(deps, board, message)
     run: ExecuteFn = execute if execute is not None else _make_default_execute(
-        board, asset_id, deps, event_sink
+        board, asset_id, run_deps, event_sink, require_tool_call=message is not None
     )
 
     outcome = _safe_execute(run, db, config, "A", "magentic", task_text)
