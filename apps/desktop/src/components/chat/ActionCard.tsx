@@ -4,6 +4,7 @@ import type { AgentEvent, ChatMessage, LauraClient, ProductionStatus } from "../
 import { parseJobError, useJobStatus } from "../../hooks/useJobStatus";
 import { log } from "../../shared/log";
 import { EventLine } from "../ChatPanel";
+import { CardErrorBoundary } from "./CardErrorBoundary";
 
 /** Same cadence as `useProductionSession`'s board/job poll (see hooks/useProductionSession.ts) —
  * kept in step so a chat thread narrating a session feels like the rest of the app, not a
@@ -225,8 +226,21 @@ function ProductionActionCard({
 
   return (
     <div className="mb-1.5 rounded-md border border-bezel bg-surface-2 px-1.5 py-1 text-[11px]">
+      {/* Each line individually guarded: the original white-screen came from exactly one
+       * defective `done` event line (see CardErrorBoundary) — one bad event must not take the
+       * card's status line (or the app) with it. Slim line fallback, not the card-shaped
+       * default, since these render inside this card's own frame already. */}
       {shown.map((event, i) => (
-        <EventLine key={i} event={event} />
+        <CardErrorBoundary
+          key={i}
+          fallback={
+            <div className="mb-1 text-content-faint">
+              ⚠ Diese Zeile konnte nicht angezeigt werden.
+            </div>
+          }
+        >
+          <EventLine event={event} />
+        </CardErrorBoundary>
       ))}
       {!showAll && events.length > EVENT_PREVIEW_COUNT && (
         <button

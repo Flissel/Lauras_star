@@ -3,6 +3,7 @@ import { type ReactElement, useEffect, useRef } from "react";
 import type { ChatMessage, LauraClient } from "../../api";
 import { ActionCard } from "./ActionCard";
 import { ApprovalCard } from "./ApprovalCard";
+import { CardErrorBoundary } from "./CardErrorBoundary";
 
 /** The load-bearing fact of a `text` message — `content` is typed `Record<string, unknown>`
  * (see api.ts's `ChatMessage`); the real shape comes from the backend's `{"text": text}` writes
@@ -49,6 +50,10 @@ export interface ChatThreadProps {
  * the discriminated `ChatMessageKind` in api.ts. Auto-scrolls a sentinel at the tail into view
  * whenever `messages` changes, so a new turn (or a poll-driven card update) keeps the newest
  * content visible without the user scrolling manually.
+ *
+ * Every card renders inside a per-message `CardErrorBoundary` — the single wrap point in the
+ * map below is deliberate, so a future card kind cannot ship unguarded (see CardErrorBoundary's
+ * doc for the white-screen this prevents).
  */
 export function ChatThread({
   messages,
@@ -64,28 +69,24 @@ export function ChatThread({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-2 py-1.5">
-      {messages.map((message) => {
-        if (message.kind === "approval_request") {
-          return (
+      {messages.map((message) => (
+        <CardErrorBoundary key={message.id}>
+          {message.kind === "approval_request" ? (
             <ApprovalCard
-              key={message.id}
               message={message}
               onDecide={(decision) => onDecide(message.id, decision)}
             />
-          );
-        }
-        if (message.kind === "action") {
-          return (
+          ) : message.kind === "action" ? (
             <ActionCard
-              key={message.id}
               message={message}
               client={client}
               onFocus={onFocusAction ? () => onFocusAction(message.id) : undefined}
             />
-          );
-        }
-        return <TextBubble key={message.id} message={message} />;
-      })}
+          ) : (
+            <TextBubble message={message} />
+          )}
+        </CardErrorBoundary>
+      ))}
       <div ref={bottomRef} />
     </div>
   );
