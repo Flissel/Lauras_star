@@ -247,6 +247,73 @@ def test_task_text_follow_up_block_only_with_message(tmp_path: Path) -> None:
     assert "storyline: DONE (v2) [archived: v1]" in with_message
 
 
+def test_task_text_carries_source_scene_transcripts(tmp_path: Path) -> None:
+    """Live 2026-08-04: the task string carried only scout hits — the team never saw what is
+    actually SAID per scene, and the scripts came out as invented marketing copy. The task now
+    carries per-scene transcript excerpts as ground truth plus the grounding rule."""
+    db, asset_id = _seed_scene(tmp_path)
+    root = production_orchestrator.board_root_for(db, asset_id, "sess1")
+    meta = BoardMeta(
+        session_id="sess1",
+        asset_id=asset_id,
+        created_utc="2026-08-04T00:00:00+00:00",
+        task="overview short",
+        target_seconds=20.0,
+    )
+    board = Board.create(root, meta)
+
+    task = production_orchestrator.build_production_task(
+        db, board, asset_id=asset_id, task="overview short", target_seconds=20
+    )
+
+    assert "SOURCE MATERIAL" in task
+    assert "hallo welt schauen wir uns das dashboard an" in task
+    assert "scene 1" in task
+    assert "get_scene_transcript" in task
+    assert "invented" in task.lower()
+
+
+def test_task_text_excerpts_are_capped_per_scene(tmp_path: Path) -> None:
+    """A scene's excerpt is a taste, not the full text — the tool has the rest. An uncapped
+    dump of a long talking-head scene would bloat every run's task string."""
+    db, asset_id = _seed_scene(tmp_path)
+    long_text = " ".join(f"wortnummer{i:03d}" for i in range(60))  # ~840 chars, unique tokens
+    run = repos.create_analysis_run(db, asset_id=asset_id, pipeline_version="t2", config={})
+    repos.start_analysis_run(db, run["id"])
+    repos.insert_segment_with_words(
+        db,
+        asset_id=asset_id,
+        run_id=run["id"],
+        speaker_id=None,
+        segment={
+            "start_sample": 0,
+            "end_sample": 96_000,
+            "start_frame": 0,
+            "end_frame": SCENE_FRAMES,
+            "text": long_text,
+            "confidence": 1.0,
+        },
+        words=[],
+    )
+    repos.finish_analysis_run(db, run["id"], status="succeeded", diagnostics={})
+    root = production_orchestrator.board_root_for(db, asset_id, "sess1")
+    meta = BoardMeta(
+        session_id="sess1",
+        asset_id=asset_id,
+        created_utc="2026-08-04T00:00:00+00:00",
+        task="overview short",
+        target_seconds=20.0,
+    )
+    board = Board.create(root, meta)
+
+    task = production_orchestrator.build_production_task(
+        db, board, asset_id=asset_id, task="overview short", target_seconds=20
+    )
+
+    assert long_text not in task, "the full text belongs to get_scene_transcript, not the task"
+    assert long_text[:300] in task
+
+
 # --- run_production -----------------------------------------------------------------------
 
 

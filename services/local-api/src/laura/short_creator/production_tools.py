@@ -858,6 +858,18 @@ def budget_words_for(usable_seconds: float, language: str = _DEFAULT_LANGUAGE) -
     return word_budget_for(usable_seconds * (1.0 - _BUDGET_HEADROOM), language)
 
 
+# The under-budget gate (live 2026-08-04): three 45-60s targets shipped as 20-34s films
+# because the team wrote ~50-word scripts against a computed 93-word allocation.
+# script_budget's docstring says "call it ONCE before writing" — prompts do not bind, so the
+# floor lives on the write path (same lesson as the storyline-order guard). Both bounds must
+# hold before the gate speaks: the chapter is below RATIO of its allocation AND the missing
+# words are at least MISSING_S of film — tiny chapters (a 7-word hook) must never nag. The
+# allocation itself is capacity-limited (usable = min(target, material)), so the gate never
+# demands words the footage could not cover; what it blocks is leaving budgeted film unwritten.
+_BUDGET_GATE_RATIO = 0.7
+_BUDGET_GATE_MISSING_S = 5.0
+
+
 def segment_capacity_seconds(window: BestWindow, scene_duration_s: float) -> float:
     """How long the CUT can make this segment — the stretch cap build_cutlist applies.
 
@@ -1155,6 +1167,79 @@ def build_production_tool_specs(
                 "src_end_frame_exclusive": src_end_exclusive,
                 "duration_s": round(duration_s, 2),
                 "text": text,
+            }
+        except Exception as exc:  # tool must never kill the agent loop
+            return {"ok": False, "reason": str(exc)[:200]}
+
+    def get_scene_transcript(scene_number: int) -> dict[str, Any]:
+        """The scene's verbatim source transcript — the ground truth script lines are built
+        from. Each spoken segment with scene-relative start/end seconds, speaker and text,
+        plus verbatim_words: the exact word stream inside the scene's frame range (word rows
+        past the scene boundary are excluded even when their segment straddles it). Quote or
+        tightly paraphrase THESE words and the review's visible facts — a claim supported by
+        neither is invented. Empty segments mean the scene has no speech: narrate what the
+        review says is visible instead."""
+        try:
+            asset = repos.get_asset(db, asset_id)
+            if asset is None:
+                return {"ok": False, "reason": "unknown scene"}
+            timeline = repos.get_or_create_asset_rough_cut(
+                db, str(asset["project_id"]), asset_id
+            )
+            scenes = repos.list_scenes(db, str(timeline["id"]))
+            by_number = {int(s["order_index"]) + 1: s for s in scenes}
+            scene = by_number.get(int(scene_number))
+            if scene is None:
+                return {"ok": False, "reason": "unknown scene"}
+            clips = repos.list_timeline_clips(db, str(timeline["id"]))
+            ranges = context._scene_src_ranges(
+                clips,
+                seq_in=int(scene["seq_in_frame"]),
+                seq_out_exclusive=int(scene["seq_out_frame_exclusive"]),
+            )
+            if not ranges:
+                return {"ok": False, "reason": "unknown scene"}
+            src_start, src_end_exclusive = ranges[0][0], ranges[-1][1]
+            fps = _fps(db, asset)
+            run = repos.get_latest_transcript_run(db, asset_id)
+            segments = (
+                repos.get_transcript(db, asset_id, str(run["id"])) if run is not None else []
+            )
+            in_scene = context._segments_in_ranges(segments, ranges)
+
+            def _word_in_ranges(word: dict[str, Any]) -> bool:
+                start_frame, end_frame = word.get("start_frame"), word.get("end_frame")
+                if start_frame is None or end_frame is None:
+                    return False
+                s, e = int(start_frame), int(end_frame)
+                return any(e > lo and s < hi for lo, hi in ranges)
+
+            seg_rows: list[dict[str, Any]] = []
+            verbatim: list[str] = []
+            for seg in in_scene:
+                start_s = max(0.0, (int(seg["start_frame"]) - src_start) / fps)
+                end_s = max(start_s, (int(seg["end_frame"]) - src_start) / fps)
+                seg_rows.append(
+                    {
+                        "start_s": round(start_s, 2),
+                        "end_s": round(end_s, 2),
+                        "speaker": seg.get("speaker_label"),
+                        "text": str(seg.get("text") or "").strip(),
+                    }
+                )
+                verbatim.extend(
+                    text
+                    for w in seg.get("words") or []
+                    if _word_in_ranges(w) and (text := str(w.get("text") or "").strip())
+                )
+            return {
+                "ok": True,
+                "scene_number": int(scene_number),
+                "src_start_frame": src_start,
+                "src_end_frame_exclusive": src_end_exclusive,
+                "duration_s": round((src_end_exclusive - src_start) / fps, 2),
+                "segments": seg_rows,
+                "verbatim_words": " ".join(verbatim),
             }
         except Exception as exc:  # tool must never kill the agent loop
             return {"ok": False, "reason": str(exc)[:200]}
@@ -1484,13 +1569,22 @@ def build_production_tool_specs(
         except Exception as exc:  # tool must never kill the agent loop
             return {"ok": False, "reason": str(exc)[:200]}
 
+    # Per-run acknowledgement for the under-budget gate: the FIRST far-under-budget save of a
+    # chapter is rejected with the numbers; saving that chapter again is the author saying
+    # "the shorter film is deliberate" and is accepted, with the gap still named in the reply.
+    # Same per-run-closure lifetime as ``healthy_re_reviews``.
+    budget_gate_hit: set[int] = set()
+
     def save_script_chapter(chapter: int, lines: list[dict[str, Any]]) -> dict[str, Any]:
         """Replace one chapter's script lines; every other chapter's lines are kept as-is
         (merge semantics). Lines are validated (each needs scene_number + text; a malformed
         line is rejected with field-level validation errors). The script's language follows the
-        board's — an English board produces an English-tagged script. Saving invalidates every
-        downstream artifact (voice, cutlist, render report, qa report) so they get regenerated
-        from the new script."""
+        board's — an English board produces an English-tagged script. A chapter far below its
+        script_budget per_chapter allocation is rejected ONCE with the exact numbers: write the
+        missing words from the scene's transcript (get_scene_transcript) and reviews, or save
+        the chapter again unchanged to deliberately accept a shorter film. Saving invalidates
+        every downstream artifact (voice, cutlist, render report, qa report) so they get
+        regenerated from the new script."""
         try:
             # The chain is storyline -> script, and a save_storyline wipes everything below.
             # A script written FIRST is doomed work: a live run wrote a complete 433-word
@@ -1528,10 +1622,45 @@ def build_production_tool_specs(
                         f"what it MEANS instead of describing it."
                     ),
                 }
-            existing = board.load("script")
             # The board decides the language, not a hard-coded "de": two English runs wrote
             # English text tagged "de" because this line ignored the board.
             language = board.meta().language
+            # The under-budget gate (_BUDGET_GATE_*), computed from the SAME material as
+            # script_budget so the number in this message and the number the author was told
+            # to write to can never diverge. Live 2026-08-04: 45-60s targets shipped as
+            # 20-34s films off ~50-word chapters nobody stopped.
+            per_chapter, _missing_scenes, _n_resolved = _storyline_material(
+                db, board, asset_id, storyline_for_guard
+            )
+            usable = usable_budget_seconds(
+                material_seconds=sum(per_chapter.values()),
+                target_seconds=board.meta().target_seconds,
+            )
+            shares = allocate_chapter_seconds(per_chapter, usable_seconds=usable)
+            budget_words = chapter_word_budgets(shares, language).get(chapter, 0)
+            words_after = sum(len(line.text.split()) for line in new_lines)
+            missing_s = (budget_words - words_after) * seconds_per_word(language)
+            under_budget = (
+                budget_words > 0
+                and words_after < _BUDGET_GATE_RATIO * budget_words
+                and missing_s >= _BUDGET_GATE_MISSING_S
+            )
+            if under_budget and chapter not in budget_gate_hit:
+                budget_gate_hit.add(chapter)
+                return {
+                    "ok": False,
+                    "reason": (
+                        f"chapter {chapter}: {words_after} words against its "
+                        f"{budget_words}-word share of script_budget — about {missing_s:.0f}s "
+                        "of the film would simply be missing. Nothing was saved. Write the "
+                        "missing words from the SOURCE, not from imagination: "
+                        "get_scene_transcript(scene_number) quotes what is actually said, the "
+                        "reviews say what is visible. If the scenes truly hold nothing more "
+                        "worth saying, save this chapter again and the shorter film is "
+                        "accepted."
+                    ),
+                }
+            existing = board.load("script")
             kept: list[ScriptLine] = []
             replaced: list[ScriptLine] = []
             if isinstance(existing, Script):
@@ -1550,7 +1679,6 @@ def build_production_tool_specs(
             # 263 words fell to 123 — a 174s film with ~50s of voice — without anyone
             # noticing, because the reply named only version and line count.
             words_before = sum(len(line.text.split()) for line in replaced)
-            words_after = sum(len(line.text.split()) for line in new_lines)
             result: dict[str, Any] = {
                 "ok": True,
                 "version": version,
@@ -1570,23 +1698,26 @@ def build_production_tool_specs(
             # The first full agent-built film shipped 62 words into an 11.5s chapter — the
             # TOTAL was on budget, the distribution was not, and 14s of narration fell off the
             # end (voice_fits FAIL by 26s). Say it here, where redistribution is still cheap.
-            storyline_now = board.load("storyline")
-            if isinstance(storyline_now, Storyline):
-                per_chapter, _missing, _n = _storyline_material(
-                    db, board, asset_id, storyline_now
+            # ``per_chapter`` is the gate's computation above — a script save never touches
+            # the storyline, so it is still current here.
+            capacity = per_chapter.get(chapter)
+            voice_s = estimate_voice_seconds(words_after, language)
+            # capacity 0.0 means the chapter's scenes could not be RESOLVED (unknown), not
+            # that they hold nothing — a "0.0s" false alarm teaches agents to ignore the
+            # real one.
+            if capacity is not None and capacity > 0.0 and voice_s > capacity + 0.5:
+                result["capacity_warning"] = (
+                    f"chapter {chapter}: {words_after} words are ~{voice_s:.1f}s of voice, "
+                    f"but its scenes hold only {capacity:.1f}s — the overflow will have no "
+                    "picture. Move the extra words to a chapter with spare capacity (see "
+                    "script_budget's per_chapter) or cut them."
                 )
-                capacity = per_chapter.get(chapter)
-                voice_s = estimate_voice_seconds(words_after, language)
-                # capacity 0.0 means the chapter's scenes could not be RESOLVED (unknown), not
-                # that they hold nothing — a "0.0s" false alarm teaches agents to ignore the
-                # real one.
-                if capacity is not None and capacity > 0.0 and voice_s > capacity + 0.5:
-                    result["capacity_warning"] = (
-                        f"chapter {chapter}: {words_after} words are ~{voice_s:.1f}s of voice, "
-                        f"but its scenes hold only {capacity:.1f}s — the overflow will have no "
-                        "picture. Move the extra words to a chapter with spare capacity (see "
-                        "script_budget's per_chapter) or cut them."
-                    )
+            if under_budget:
+                result["budget_warning"] = (
+                    f"chapter {chapter} stays at {words_after} of its {budget_words}-word "
+                    f"share of script_budget (~{missing_s:.0f}s of film shorter) — accepted "
+                    "as a deliberate shorter film."
+                )
             return result
         except Exception as exc:  # tool must never kill the agent loop
             return {"ok": False, "reason": str(exc)[:200]}
@@ -2310,6 +2441,7 @@ def build_production_tool_specs(
     funcs: list[Callable[..., dict[str, Any]]] = [
         board_status,
         get_scene_context,
+        get_scene_transcript,
         review_scene,
         get_reviews,
         save_storyline,

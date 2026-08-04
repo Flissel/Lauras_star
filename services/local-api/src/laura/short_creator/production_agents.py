@@ -111,18 +111,23 @@ def production_agent_specs(language: str = "German") -> list[AgentSpec]:
                 "right total over a wrong split still breaks the film. A chapter budgeted at "
                 "almost nothing means its reviewed window is about a second long — write "
                 "barely anything there rather than borrowing from the total. Then "
-                "get_scene_context (and get_reviews for visual detail) for each "
-                "scene you write for. Write 1-2 sentences per scene, per chapter, in "
+                "get_scene_transcript for each scene you write for — the verbatim spoken "
+                "words — plus get_reviews for what is visible. "
+                "Write 1-2 sentences per scene, per chapter, in "
                 f"{language} — the video's language, never switch languages mid-script. "
                 "Write each chapter's "
                 "lines in the SAME scene order the storyline lists that chapter's scenes in — "
                 "voice and captions play back in that order, not the order you type them in. A "
                 "chapter may list the same scene several times with different windows — write "
                 "that scene's line(s) once for the chapter; they cover all its windows. "
-                "Ground every sentence in what the review says is VISIBLE; never invent a claim "
-                "the scene does not support. Keep the tone energetic with concrete value, no "
-                "marketing fog, no sleepy phrasing — this has to hook a cold, scrolling viewer "
-                "in the first seconds. Save chapter by chapter via save_script_chapter (it "
+                "GROUNDING RULE: every line must be supported by the scene's transcript "
+                "(get_scene_transcript) or its review — quote or tightly paraphrase what is "
+                "actually said and seen; never invent a product claim, feature name or "
+                "capability neither of them contains. Generic marketing copy ('maximale "
+                "Effizienz') is a defect, not a style. Keep the tone energetic with concrete "
+                "value, no marketing fog, no sleepy phrasing — this has to hook a cold, "
+                "scrolling viewer in the first seconds. "
+                "Save chapter by chapter via save_script_chapter (it "
                 "merges — other chapters' lines stay untouched); fix and resave on validation "
                 "errors. Verify with get_script once every chapter in the storyline has its "
                 "lines written — it reports words against budget_words, a shortfall_pct, "
@@ -147,6 +152,7 @@ def production_agent_specs(language: str = "German") -> list[AgentSpec]:
                 "script_budget",
                 "get_reviews",
                 "get_scene_context",
+                "get_scene_transcript",
                 "save_script_chapter",
                 "get_script",
             ),

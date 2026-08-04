@@ -68,6 +68,43 @@ def _expected_scene_numbers(db: Database, asset_id: str) -> list[int]:
     return [int(s["scene_number"]) for s in result.get("scenes", [])]
 
 
+# Per-scene excerpt sizing for the task text's SOURCE MATERIAL section. 300 chars mirrors the
+# review snippet (production_tools' _SNIPPET_CHARS); the total cap keeps a many-scene rough
+# cut from bloating every run's task string — past it, the tail is a pointer to
+# get_scene_transcript instead of more text.
+_EXCERPT_CHARS = 300
+_EXCERPT_TOTAL_CHARS = 6000
+
+
+def _source_material_section(db: Database, asset_id: str) -> str:
+    """The per-scene transcript excerpt lines the task text carries as ground truth.
+
+    Live 2026-08-04: the task string carried only the scout's hits — the team never saw what
+    the source actually SAYS per scene, wrote invented marketing copy, and the operator rebuilt
+    the script from the transcript by hand. One capped excerpt line per rough-cut scene, so
+    every agent (not just the one holding get_scene_transcript) reads the same reality.
+    """
+    scenes = context.scene_transcripts(db, asset_id).get("scenes", [])
+    lines: list[str] = []
+    spent = 0
+    for index, scene in enumerate(scenes):
+        text = " ".join(str(scene.get("text") or "").split())
+        excerpt = text[:_EXCERPT_CHARS] + ("…" if len(text) > _EXCERPT_CHARS else "")
+        if not text:
+            excerpt = "(no speech)"
+        if spent + len(excerpt) > _EXCERPT_TOTAL_CHARS:
+            lines.append(
+                f"   ({len(scenes) - index} more scenes omitted — "
+                "get_scene_transcript(scene_number) has each scene's full text)"
+            )
+            break
+        spent += len(excerpt)
+        lines.append(f"   - scene {int(scene['scene_number'])}: {excerpt}")
+    if not lines:
+        lines.append("   (no transcript available)")
+    return "\n".join(lines)
+
+
 def build_production_task(
     db: Database,
     board: Board,
@@ -79,7 +116,7 @@ def build_production_task(
 ) -> str:
     """The task text handed to the magentic production team: a resume-aware contract.
 
-    Six fixed, deterministically-ordered elements, plus a seventh that only appears when this
+    Seven fixed, deterministically-ordered elements, plus an eighth that only appears when this
     call is a follow-up on top of an already-produced board:
 
     1. goal + format + target length;
@@ -88,13 +125,16 @@ def build_production_task(
        + version, the resume point, and an explicit "do not redo" instruction). When ``message``
        is set, any artifact that has archived versions also lists them (``[archived: vN, ...]``)
        so the team can name a concrete ``(name, version)`` pair back to ``revert_artifact``;
-    4. the mandatory stage order (reviews -> storyline -> script -> voice+cutlist ->
+    4. the SOURCE MATERIAL ground truth: per-scene transcript excerpts
+       (:func:`_source_material_section`) plus the grounding rule — a script claim not
+       supported by the transcript or the scene's review is invented;
+    5. the mandatory stage order (reviews -> storyline -> script -> voice+cutlist ->
        contact sheet -> render -> qa) plus the contact-sheet checkpoint as a known pattern:
        stopping at the Kontaktbogen or rendering later is steered purely by follow-up
        messages against the normal resume flow - no extra session state;
-    5. the board's script language plus the coding-agent's ``voice_fits`` charter;
-    6. the QA revision-round limit (one revise round, then ship with findings as warnings);
-    7. only when ``message`` is set: the user's follow-up request text (capped at 2000 chars)
+    6. the board's script language plus the coding-agent's ``voice_fits`` charter;
+    7. the QA revision-round limit (one revise round, then ship with findings as warnings);
+    8. only when ``message`` is set: the user's follow-up request text (capped at 2000 chars)
        plus instructions for interpreting it against the board status above - going back to an
        earlier version is a ``revert_artifact`` call using the ``archived_versions`` listed in
        section 3, a content change is a re-save of the affected artifact (the highest affected
@@ -125,7 +165,7 @@ def build_production_task(
     if message:
         follow_up = (
             "\n"
-            "8) USER FOLLOW-UP REQUEST:\n"
+            "9) USER FOLLOW-UP REQUEST:\n"
             f"   {message[:2000]}\n"
             "   Interpret this request against the BOARD STATUS above. Going back to an "
             "earlier version: coding_agent calls revert_artifact(name, version), using the "
@@ -154,7 +194,14 @@ def build_production_task(
         "   Artifacts already on the board are DONE - do not redo them; continue at the "
         "resume point.\n"
         "\n"
-        "4) MANDATORY ORDER: reviews -> storyline -> script -> voice+cutlist -> contact sheet "
+        "4) SOURCE MATERIAL (ground truth): each scene's spoken transcript, verbatim from "
+        "the source video. Every script line must be supported by these words or by the "
+        "scene's saved review — a claim backed by neither is INVENTED and must not be "
+        "written; no generic marketing copy. scene_author reads a scene's full text via "
+        "get_scene_transcript(scene_number).\n"
+        f"{_source_material_section(db, asset_id)}\n"
+        "\n"
+        "5) MANDATORY ORDER: reviews -> storyline -> script -> voice+cutlist -> contact sheet "
         "(save_contact_sheet: ALWAYS right after build_cutlist and BEFORE render_production, "
         "and again after every cutlist rebuild - a cutlist save archives the sheet) -> render "
         "(coding_agent) -> qa. Do not skip or reorder a stage.\n"
@@ -165,7 +212,7 @@ def build_production_task(
         "rendering; a later message (e.g. 'render jetzt') resumes at render_production through "
         "the normal resume flow.\n"
         "\n"
-        f"5) LANGUAGE + CHARTER: the script MUST be written in {meta.language} - never switch "
+        f"6) LANGUAGE + CHARTER: the script MUST be written in {meta.language} - never switch "
         "languages mid-script. Coding-agent charter: if voice_fits "
         "comes back False, never shorten the voice - rebuild the cutlist with a longer "
         "per-chapter time budget and render again. THE FOOTAGE IS FIXED: there is no asset "
@@ -176,7 +223,7 @@ def build_production_task(
         "chapter's words and continue. A finished shorter film always beats an unfinished "
         "longer one.\n"
         "\n"
-        "6) QA LIMIT: after ONE revise verdict, at most one revision round is allowed - if the "
+        "7) QA LIMIT: after ONE revise verdict, at most one revision round is allowed - if the "
         "next QA pass still finds issues, deliver anyway with the findings recorded as "
         "warnings instead of looping again.\n"
         "\n"
@@ -200,7 +247,7 @@ def _tool_ownership_section(language: str) -> str:
         for spec in production_agent_specs(language)
     )
     return (
-        "7) TOOL OWNERSHIP (exhaustive - no other agent has these):\n"
+        "8) TOOL OWNERSHIP (exhaustive - no other agent has these):\n"
         f"{lines}\n"
         "   ONLY the named agent can call its tools. Never instruct any other agent - or "
         "yourself - to call a tool it does not hold; route the WORK to the agent that owns "

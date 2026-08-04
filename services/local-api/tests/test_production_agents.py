@@ -60,11 +60,14 @@ EXPECTED_ASSIGNMENTS: dict[str, tuple[tuple[str, ...], int]] = {
     "scene_author": (
         # script_budget leads the writing tools on purpose: the author asks for the word
         # count instead of guessing a length (a guessed one burned a run on 34 saves).
+        # get_scene_transcript is the grounding source (live 2026-08-04: without it the
+        # scripts were marketing copy — the writer had no way to quote what is SAID).
         (
             "get_storyline",
             "script_budget",
             "get_reviews",
             "get_scene_context",
+            "get_scene_transcript",
             "save_script_chapter",
             "get_script",
         ),
@@ -221,6 +224,11 @@ def test_prompts_carry_contracts() -> None:
     assert "review_scene" in by_name["vision_reviewer"].system_message
     assert "viral arc" in by_name["story_architect"].system_message.lower()
     assert "german" in by_name["scene_author"].system_message.lower()
+    # The grounding rule (live 2026-08-04): every line is sourced from the scene's transcript
+    # or review — the prompt must name the transcript tool and forbid invented claims.
+    assert "get_scene_transcript" in by_name["scene_author"].system_message
+    assert "transcript" in by_name["scene_author"].system_message.lower()
+    assert "invent" in by_name["scene_author"].system_message.lower()
     assert "never cut the voice" in by_name["coding_agent"].system_message.lower()
     assert "save_contact_sheet" in by_name["coding_agent"].system_message
     assert "ship or revise" in by_name["qa_reviewer"].system_message.lower()
