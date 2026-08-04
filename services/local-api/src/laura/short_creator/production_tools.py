@@ -1492,58 +1492,64 @@ def build_production_tool_specs(
         downstream artifact (voice, cutlist, render report, qa report) so they get regenerated
         from the new script."""
         try:
-            # The chain is storyline -> script, and a save_storyline wipes everything below.
-            # A script written FIRST is doomed work: a live run wrote a complete 433-word
-            # script before its storyline, and the storyline save erased all of it. The prompt
-            # mandates the order; prompts do not bind — so the contract lives here.
-            storyline_for_guard = board.load("storyline")
-            if not isinstance(storyline_for_guard, Storyline):
-                return {
-                    "ok": False,
-                    "reason": (
-                        "no storyline on the board — call save_storyline first. A script "
-                        "written before the storyline is wiped by the storyline save."
-                    ),
-                }
-            try:
-                new_lines = [ScriptLine(chapter=chapter, **line) for line in lines]
-            except ValidationError as exc:
-                return {"ok": False, "errors": _validation_errors(exc)}
-            # Screenplay labels go straight into the voice: three autonomous runs spoke
-            # "Narration:" and "CAPTION:" eight times each. Rejected here, on the write path,
-            # rather than in the model — the model also validates on load, and a board written
-            # before this rule must stay readable.
-            spoken_labels = [
-                (line.scene_number, label)
-                for line in new_lines
-                if (label := stage_direction_label(line.text)) is not None
-            ]
-            if spoken_labels:
-                detail = "; ".join(f"scene {n}: '{label}:'" for n, label in spoken_labels)
-                return {
-                    "ok": False,
-                    "reason": (
-                        f"stage-direction labels would be read out loud ({detail}). Write only "
-                        f"the spoken words — what is on screen is already on screen, so narrate "
-                        f"what it MEANS instead of describing it."
-                    ),
-                }
-            existing = board.load("script")
-            # The board decides the language, not a hard-coded "de": two English runs wrote
-            # English text tagged "de" because this line ignored the board.
-            language = board.meta().language
-            kept: list[ScriptLine] = []
-            replaced: list[ScriptLine] = []
-            if isinstance(existing, Script):
-                kept = [line for line in existing.lines if line.chapter != chapter]
-                replaced = [line for line in existing.lines if line.chapter == chapter]
-            merged = sorted(kept + new_lines, key=lambda line: line.chapter)
-            merged_script = Script(
-                language=language,
-                lines=merged,
-                parents={"storyline": _content_hash(storyline_for_guard)},
-            )
-            version = board.save("script", merged_script)
+            # The whole load-merge-save must be ONE step: agent turns fire tool calls in
+            # parallel, and a five-way save_script_chapter batch once interleaved between
+            # a sibling's load and save — chapters silently overwrote each other (and the
+            # unlocked writer of that era corrupted script.json outright).
+            with board.transaction():
+                # The chain is storyline -> script, and a save_storyline wipes everything
+                # below. A script written FIRST is doomed work: a live run wrote a complete
+                # 433-word script before its storyline, and the storyline save erased all of
+                # it. The prompt mandates the order; prompts do not bind — so the contract
+                # lives here.
+                storyline_for_guard = board.load("storyline")
+                if not isinstance(storyline_for_guard, Storyline):
+                    return {
+                        "ok": False,
+                        "reason": (
+                            "no storyline on the board — call save_storyline first. A script "
+                            "written before the storyline is wiped by the storyline save."
+                        ),
+                    }
+                try:
+                    new_lines = [ScriptLine(chapter=chapter, **line) for line in lines]
+                except ValidationError as exc:
+                    return {"ok": False, "errors": _validation_errors(exc)}
+                # Screenplay labels go straight into the voice: three autonomous runs spoke
+                # "Narration:" and "CAPTION:" eight times each. Rejected here, on the write
+                # path, rather than in the model — the model also validates on load, and a
+                # board written before this rule must stay readable.
+                spoken_labels = [
+                    (line.scene_number, label)
+                    for line in new_lines
+                    if (label := stage_direction_label(line.text)) is not None
+                ]
+                if spoken_labels:
+                    detail = "; ".join(f"scene {n}: '{label}:'" for n, label in spoken_labels)
+                    return {
+                        "ok": False,
+                        "reason": (
+                            f"stage-direction labels would be read out loud ({detail}). Write "
+                            f"only the spoken words — what is on screen is already on screen, "
+                            f"so narrate what it MEANS instead of describing it."
+                        ),
+                    }
+                existing = board.load("script")
+                # The board decides the language, not a hard-coded "de": two English runs
+                # wrote English text tagged "de" because this line ignored the board.
+                language = board.meta().language
+                kept: list[ScriptLine] = []
+                replaced: list[ScriptLine] = []
+                if isinstance(existing, Script):
+                    kept = [line for line in existing.lines if line.chapter != chapter]
+                    replaced = [line for line in existing.lines if line.chapter == chapter]
+                merged = sorted(kept + new_lines, key=lambda line: line.chapter)
+                merged_script = Script(
+                    language=language,
+                    lines=merged,
+                    parents={"storyline": _content_hash(storyline_for_guard)},
+                )
+                version = board.save("script", merged_script)
             # The word arithmetic, in the reply the agent actually reads. This save REPLACES
             # the chapter, and "replace" reads as "append" under expansion pressure: a live
             # run told to ADD ~200 words saved only the new lines per chapter, six times, and

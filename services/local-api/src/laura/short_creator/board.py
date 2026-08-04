@@ -7,19 +7,26 @@ Layout under ``<workspace>/agent-runs/<session_id>/board/``::
     storyline.json .. qa_report.json  singleton artifacts (see _SINGLETONS)
     versions/<stem>.v<k>.json       append-only archive of every replaced version
 
-Writes are atomic (tmp + replace) and pydantic-validated.  Invalidation always
-runs *downstream* along ``_CHAIN`` — never upstream — so cached upstream work
-(above all: scene reviews) survives every adjust/revert.
+Writes are atomic (uniquely named tmp + replace), JSON-guarded, and serialized by a
+process-wide per-board lock; reads heal the valid-prefix corruption class in place
+(see ``_read_model``).  Invalidation always runs *downstream* along ``_CHAIN`` —
+never upstream — so cached upstream work (above all: scene reviews) survives every
+adjust/revert.
 """
 
 from __future__ import annotations
 
 import json
+import logging
+import os
+import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, Protocol, TypeVar, cast
+from uuid import uuid4
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from laura.short_creator.board_models import (
     BoardMeta,
@@ -37,11 +44,48 @@ from laura.short_creator.board_models import (
     script_hash,
 )
 
+logger = logging.getLogger(__name__)
+
+_M = TypeVar("_M", bound=BaseModel)
+
 
 class _Versioned(Protocol):
     """Protocol for artifacts with a version field."""
 
     version: int
+
+
+class _BoardLock:
+    """Reentrant lock, one per board directory, shared process-wide.
+
+    Board instances are constructed ad hoc — per request, per tool call — so mutual
+    exclusion cannot live on the instance. The registry keys on the resolved root, and
+    every writer AND reader of one board's files goes through the same lock: on Windows
+    a replace() colliding with any open handle on the same file is a sharing violation,
+    exactly the ``[WinError 32]`` a live five-way-parallel tool batch produced.
+    """
+
+    def __init__(self) -> None:
+        self._inner = threading.RLock()
+
+    def __enter__(self) -> None:
+        self._inner.acquire()
+
+    def __exit__(self, *exc: object) -> None:
+        self._inner.release()
+
+
+_BOARD_LOCKS: dict[str, _BoardLock] = {}
+_BOARD_LOCKS_GUARD = threading.Lock()
+
+
+def _lock_for(root: Path) -> _BoardLock:
+    key = os.path.normcase(str(root.resolve()))
+    with _BOARD_LOCKS_GUARD:
+        lock = _BOARD_LOCKS.get(key)
+        if lock is None:
+            lock = _BOARD_LOCKS[key] = _BoardLock()
+        return lock
 
 _CHAIN: tuple[str, ...] = (
     "storyline",
@@ -123,9 +167,80 @@ def downstream_of(name: str) -> tuple[str, ...]:
 
 
 def _write_atomic(path: Path, text: str) -> None:
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    tmp.replace(path)
+    """Publish ``text`` at ``path`` via a uniquely named tmp file + atomic replace.
+
+    The tmp name MUST be unique per write. Every write once shared one ``<name>.tmp``:
+    a parallel tool batch truncated/wrote that single file through interleaved handles,
+    and replace() published a valid short document with the tail of a longer one glued
+    on — the 2026-08-04 board corruption. The JSON guard is the write-time gate: torn
+    or garbled text never lands on the board, whatever produced it.
+    """
+    try:
+        json.loads(text)
+    except ValueError as exc:
+        raise ValueError(f"refusing to write invalid JSON to {path.name}: {exc}") from exc
+    tmp = path.with_name(f"{path.name}.{uuid4().hex}.tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        # Windows transiently denies a replace whose destination is mid-replace from
+        # another writer (or briefly held by a scanner). The replace itself stays atomic
+        # either way — the file is always exactly ONE writer's payload — so a short
+        # bounded retry is correctness, not papering-over.
+        for attempt in range(20):
+            try:
+                tmp.replace(path)
+                break
+            except PermissionError:
+                if attempt == 19:
+                    raise
+                time.sleep(0.005 * (attempt + 1))
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _salvage_valid_prefix(text: str, model_type: type[_M]) -> _M | None:
+    """The observed corruption class: a valid JSON document with tails of older, longer
+    revisions appended. Returns the validated prefix, or None when this is not that class
+    — a schema mismatch or a torn-off head has nothing trustworthy to salvage."""
+    start = len(text) - len(text.lstrip())
+    try:
+        prefix, end = json.JSONDecoder().raw_decode(text, start)
+    except ValueError:
+        return None
+    if not text[end:].strip():
+        return None  # whole-document JSON: the failure is schema-shaped, not trailing junk
+    try:
+        return model_type.model_validate(prefix)
+    except ValidationError:
+        return None
+
+
+def _read_model(path: Path, model_type: type[_M]) -> _M:
+    """Read + validate a board file; heal the trailing-garbage corruption class in place.
+
+    A corrupt singleton used to brick the session permanently: every load raised,
+    including the resume path's, so the one artifact poisoned the whole board. When the
+    file is a valid document plus trailing garbage, that prefix IS a complete revision
+    of the artifact — return it, rewrite the file clean, and say so. Anything else
+    still raises: silence about a destroyed artifact would be worse than the brick.
+
+    Callers hold the board lock.
+    """
+    text = path.read_text(encoding="utf-8")
+    try:
+        return model_type.model_validate_json(text)
+    except ValidationError:
+        salvaged = _salvage_valid_prefix(text, model_type)
+        if salvaged is None:
+            raise
+        logger.warning(
+            "board file %s was corrupt (trailing data after a valid %s document); "
+            "healed from the valid prefix",
+            path,
+            model_type.__name__,
+        )
+        _write_atomic(path, salvaged.model_dump_json(indent=2))
+        return salvaged
 
 
 def _same_content(a: BaseModel, b: BaseModel) -> bool:
@@ -138,13 +253,16 @@ class Board:
 
     def __init__(self, root: Path) -> None:
         self.root = root
+        self._lock = _lock_for(root)
 
     @classmethod
     def create(cls, root: Path, meta: BoardMeta) -> Board:
         (root / "scene_reviews").mkdir(parents=True, exist_ok=True)
         (root / "versions").mkdir(parents=True, exist_ok=True)
-        _write_atomic(root / "meta.json", meta.model_dump_json(indent=2))
-        return cls(root)
+        board = cls(root)
+        with board._lock:
+            _write_atomic(root / "meta.json", meta.model_dump_json(indent=2))
+        return board
 
     @classmethod
     def open(cls, root: Path) -> Board:
@@ -152,32 +270,42 @@ class Board:
             raise FileNotFoundError(f"no board at {root}")
         return cls(root)
 
+    def transaction(self) -> _BoardLock:
+        """The board's lock, for holding across a read-modify-write sequence.
+
+        Every Board method is atomic on its own, but a caller that loads an artifact,
+        merges into it, and saves it back is three atomic steps — a parallel tool batch
+        interleaving between them loses updates. ``with board.transaction():`` makes the
+        whole sequence one step; nested Board calls re-enter the same lock."""
+        return self._lock
+
     def meta(self) -> BoardMeta:
-        raw = (self.root / "meta.json").read_text(encoding="utf-8")
-        return BoardMeta.model_validate_json(raw)
+        with self._lock:
+            return _read_model(self.root / "meta.json", BoardMeta)
 
     # -- scene reviews ---------------------------------------------------
 
     def save_scene_review(self, review: SceneReview) -> int:
-        stem = f"scene_{review.scene_number}"
-        path = self.root / "scene_reviews" / f"{stem}.json"
-        current_version = 0
-        if path.is_file():
-            old = SceneReview.model_validate_json(path.read_text(encoding="utf-8"))
-            current_version = old.version
-            self._archive(stem, old.version, path)
-        version = max([current_version, *self.versions(stem)]) + 1
-        stamped = review.model_copy(update={"version": version})
-        _write_atomic(path, stamped.model_dump_json(indent=2))
-        return version
+        with self._lock:
+            stem = f"scene_{review.scene_number}"
+            path = self.root / "scene_reviews" / f"{stem}.json"
+            current_version = 0
+            if path.is_file():
+                old = _read_model(path, SceneReview)
+                current_version = old.version
+                self._archive(stem, old.version, path)
+            version = max([current_version, *self.versions(stem)]) + 1
+            stamped = review.model_copy(update={"version": version})
+            _write_atomic(path, stamped.model_dump_json(indent=2))
+            return version
 
     def scene_reviews(self) -> list[SceneReview]:
-        folder = self.root / "scene_reviews"
-        reviews = [
-            SceneReview.model_validate_json(p.read_text(encoding="utf-8"))
-            for p in folder.glob("scene_*.json")
-        ]
-        return sorted(reviews, key=lambda r: r.scene_number)
+        with self._lock:
+            folder = self.root / "scene_reviews"
+            reviews = [
+                _read_model(p, SceneReview) for p in folder.glob("scene_*.json")
+            ]
+            return sorted(reviews, key=lambda r: r.scene_number)
 
     # -- singleton artifacts -----------------------------------------------
 
@@ -191,74 +319,81 @@ class Board:
             raise TypeError(
                 f"{name} expects {model_type.__name__}, got {type(artifact).__name__}"
             )
-        path = self.root / f"{name}.json"
-        current_version = 0
-        if path.is_file():
-            old = model_type.model_validate_json(path.read_text(encoding="utf-8"))
-            old_versioned = cast(_Versioned, old)
-            current_version = int(old_versioned.version)
-            # A save that changes nothing has made nothing downstream stale. Re-saving an
-            # identical artifact used to wipe the whole chain below it and force a rebuild —
-            # a live run burned its turn budget doing exactly that three times over.
-            if _same_content(old, artifact):
-                return current_version
-            self._archive(name, current_version, path)
-        version = max([current_version, *self.versions(name)]) + 1
-        stamped = artifact.model_copy(update={"version": version})
-        _write_atomic(path, stamped.model_dump_json(indent=2))
-        self.invalidate(name)
-        return version
+        with self._lock:
+            path = self.root / f"{name}.json"
+            current_version = 0
+            if path.is_file():
+                old = _read_model(path, model_type)
+                old_versioned = cast(_Versioned, old)
+                current_version = int(old_versioned.version)
+                # A save that changes nothing has made nothing downstream stale. Re-saving an
+                # identical artifact used to wipe the whole chain below it and force a rebuild —
+                # a live run burned its turn budget doing exactly that three times over.
+                if _same_content(old, artifact):
+                    return current_version
+                self._archive(name, current_version, path)
+            version = max([current_version, *self.versions(name)]) + 1
+            stamped = artifact.model_copy(update={"version": version})
+            _write_atomic(path, stamped.model_dump_json(indent=2))
+            self.invalidate(name)
+            return version
 
     def load(self, name: str) -> BaseModel | None:
         model_type = _SINGLETONS.get(name)
         if model_type is None:
             raise KeyError(f"unknown artifact: {name}")
-        path = self.root / f"{name}.json"
-        if not path.is_file():
-            return None
-        return model_type.model_validate_json(path.read_text(encoding="utf-8"))
+        with self._lock:
+            path = self.root / f"{name}.json"
+            if not path.is_file():
+                return None
+            return _read_model(path, model_type)
 
     def invalidate(self, name: str) -> list[str]:
         """Archive + remove every present artifact downstream of ``name``."""
-        removed: list[str] = []
-        for dep in downstream_of(name):
-            path = self.root / f"{dep}.json"
-            if path.is_file():
-                model_type = _SINGLETONS[dep]
-                cur = model_type.model_validate_json(path.read_text(encoding="utf-8"))
-                cur_versioned = cast(_Versioned, cur)
-                self._archive(dep, int(cur_versioned.version), path)
-                path.unlink()
-                removed.append(dep)
-        return removed
+        with self._lock:
+            removed: list[str] = []
+            for dep in downstream_of(name):
+                path = self.root / f"{dep}.json"
+                if path.is_file():
+                    cur = _read_model(path, _SINGLETONS[dep])
+                    cur_versioned = cast(_Versioned, cur)
+                    self._archive(dep, int(cur_versioned.version), path)
+                    path.unlink()
+                    removed.append(dep)
+            return removed
 
     def revert(self, name: str, version: int) -> None:
         """Restore an archived version as current; downstream is invalidated."""
         if name not in _SINGLETONS:
             raise KeyError(f"unknown artifact: {name}")
-        archived = self.root / "versions" / f"{name}.v{version}.json"
-        if not archived.is_file():
-            raise FileNotFoundError(f"no archived {name} v{version}")
-        path = self.root / f"{name}.json"
-        if path.is_file():
+        with self._lock:
+            archived = self.root / "versions" / f"{name}.v{version}.json"
+            if not archived.is_file():
+                raise FileNotFoundError(f"no archived {name} v{version}")
             model_type = _SINGLETONS[name]
-            cur = model_type.model_validate_json(path.read_text(encoding="utf-8"))
-            cur_versioned = cast(_Versioned, cur)
-            self._archive(name, int(cur_versioned.version), path)
-        _write_atomic(path, archived.read_text(encoding="utf-8"))
-        self.invalidate(name)
+            # A corrupt archive must fail loudly HERE, not become the current artifact.
+            archived_text = archived.read_text(encoding="utf-8")
+            model_type.model_validate_json(archived_text)
+            path = self.root / f"{name}.json"
+            if path.is_file():
+                cur = _read_model(path, model_type)
+                cur_versioned = cast(_Versioned, cur)
+                self._archive(name, int(cur_versioned.version), path)
+            _write_atomic(path, archived_text)
+            self.invalidate(name)
 
     # -- shared internals --------------------------------------------------
 
     def versions(self, stem: str) -> list[int]:
         """Archived version numbers for a singleton name or ``scene_<n>`` stem."""
-        prefix = f"{stem}.v"
-        out: list[int] = []
-        for p in (self.root / "versions").glob(f"{stem}.v*.json"):
-            digits = p.name[len(prefix) : -len(".json")]
-            if digits.isdigit():
-                out.append(int(digits))
-        return sorted(out)
+        with self._lock:
+            prefix = f"{stem}.v"
+            out: list[int] = []
+            for p in (self.root / "versions").glob(f"{stem}.v*.json"):
+                digits = p.name[len(prefix) : -len(".json")]
+                if digits.isdigit():
+                    out.append(int(digits))
+            return sorted(out)
 
     def _archive(self, stem: str, version: int, path: Path) -> None:
         dest = self.root / "versions" / f"{stem}.v{version}.json"
@@ -279,16 +414,17 @@ class Board:
         Successor to the review-killed single-link restore (41ecc51): script text alone could
         not identify a render; the parent-instance hashes can.
         """
-        restored: list[str] = []
-        for name in _CHAIN:
-            if self.load(name) is not None:
-                continue
-            candidate_version = self._newest_matching_version(name)
-            if candidate_version is None:
-                break
-            self.revert(name, candidate_version)
-            restored.append(name)
-        return restored
+        with self._lock:
+            restored: list[str] = []
+            for name in _CHAIN:
+                if self.load(name) is not None:
+                    continue
+                candidate_version = self._newest_matching_version(name)
+                if candidate_version is None:
+                    break
+                self.revert(name, candidate_version)
+                restored.append(name)
+            return restored
 
     def _newest_matching_version(self, name: str) -> int | None:
         """The newest archived version of ``name`` whose parents all match the board."""
@@ -315,8 +451,9 @@ class Board:
         hard-failed, only the job result knew, so the session endpoint kept reporting a serene
         "active" for a run that had been dead for the better part of an hour.
         """
-        meta = self.meta().model_copy(update={"status": value})
-        _write_atomic(self.root / "meta.json", meta.model_dump_json(indent=2))
+        with self._lock:
+            meta = self.meta().model_copy(update={"status": value})
+            _write_atomic(self.root / "meta.json", meta.model_dump_json(indent=2))
 
     def resume_point(self, expected_scenes: list[int]) -> str:
         """First missing artifact — where a (re)started session job continues."""
@@ -335,10 +472,11 @@ class Board:
         # The honest repair is at the WRITE site (do not record a render that did not happen) plus
         # a re-poll rather than a re-render, and that is a design, not a guard. Until then the
         # failure is at least VISIBLE: status() reports checks_ok and failed_checks.
-        for name in _CHAIN:
-            if self.load(name) is None:
-                return name
-        return "done"
+        with self._lock:
+            for name in _CHAIN:
+                if self.load(name) is None:
+                    return name
+            return "done"
 
     def status(self) -> dict[str, Any]:
         """Board summary for the session API (versions + presence + whether the work happened)."""

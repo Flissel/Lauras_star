@@ -1,10 +1,13 @@
 """Store tests: lifecycle, scene-review versioning."""
 
+import json
+import threading
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
-from laura.short_creator.board import Board, downstream_of
+from laura.short_creator.board import Board, _write_atomic, downstream_of
 from laura.short_creator.board_models import (  # noqa: E402
     BestWindow,
     BoardMeta,
@@ -249,3 +252,156 @@ def test_saving_changed_content_still_invalidates_downstream(tmp_path: Path) -> 
 
     assert board.load("script") is None, "a changed storyline must drop the script"
     assert version == 2
+
+
+# -- corruption & concurrency (live incident 2026-08-04) -------------------------
+#
+# A production team turn fired five save_script_chapter tool calls IN PARALLEL (AutoGen
+# executes a turn's tool calls concurrently). Every _write_atomic used the same tmp path
+# (script.json.tmp), so two threads truncated/wrote the one tmp file at interleaved
+# offsets and replace() published "[valid short JSON][tail of a longer revision]" —
+# plus a live [WinError 32] sharing violation. The corrupt file then bricked every
+# load on the board, including resume.
+
+
+def _run_all(threads: list[threading.Thread]) -> None:
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+    assert not any(t.is_alive() for t in threads), "worker threads deadlocked"
+
+
+def test_write_atomic_refuses_non_json(tmp_path: Path) -> None:
+    """Garbage must never land on the board: the writer validates before publishing."""
+    target = tmp_path / "artifact.json"
+    _write_atomic(target, '{"ok": true}')
+    with pytest.raises(ValueError):
+        _write_atomic(target, '{"version": 3, "l')  # a torn write fragment
+    assert json.loads(target.read_text(encoding="utf-8")) == {"ok": True}
+
+
+def test_write_atomic_concurrent_writers_leave_one_intact_payload(tmp_path: Path) -> None:
+    """Racing writers may pick any winner, but the file must always be ONE whole payload."""
+    target = tmp_path / "artifact.json"
+    payloads = [
+        json.dumps({"writer": i, "pad": "x" * (10 + 400 * (i % 2))}) for i in range(8)
+    ]
+    errors: list[Exception] = []
+    barrier = threading.Barrier(len(payloads))
+
+    def write(text: str) -> None:
+        try:
+            barrier.wait(timeout=30)
+            for _ in range(25):
+                _write_atomic(target, text)
+        except Exception as exc:  # noqa: BLE001 — collected for the assertion below
+            errors.append(exc)
+
+    _run_all([threading.Thread(target=write, args=(p,)) for p in payloads])
+    assert errors == []
+    assert target.read_text(encoding="utf-8") in payloads
+
+
+def test_load_salvages_valid_prefix_and_heals_file(tmp_path: Path) -> None:
+    """The observed corruption class — valid JSON + tails of older revisions — must load
+    from the valid prefix and heal the file on disk instead of bricking the board."""
+    board = Board.create(tmp_path / "board", _meta())
+    board.save("script", _script())
+    path = tmp_path / "board" / "script.json"
+    intact = path.read_text(encoding="utf-8")
+    path.write_text(intact + '005a210a2b6cc228a7"\n  }\n}', encoding="utf-8")
+
+    salvaged = board.load("script")
+
+    assert isinstance(salvaged, Script)
+    assert [line.text for line in salvaged.lines] == ["Stopp!"]
+    healed = Script.model_validate_json(path.read_text(encoding="utf-8"))
+    assert healed.lines == salvaged.lines, "the file itself is clean again after the load"
+
+
+def test_load_still_raises_when_no_valid_prefix(tmp_path: Path) -> None:
+    """A file with its head torn off has nothing to salvage — that stays a loud error."""
+    board = Board.create(tmp_path / "board", _meta())
+    board.save("script", _script())
+    path = tmp_path / "board" / "script.json"
+    path.write_text('ersion": 3, "lines": []}', encoding="utf-8")
+    with pytest.raises(ValidationError):
+        board.load("script")
+
+
+def test_load_does_not_mask_schema_mismatch(tmp_path: Path) -> None:
+    """Salvage is for trailing garbage only: intact JSON of the wrong shape still raises."""
+    board = Board.create(tmp_path / "board", _meta())
+    path = tmp_path / "board" / "script.json"
+    path.write_text('{"not_a_script": true}', encoding="utf-8")
+    with pytest.raises(ValidationError):
+        board.load("script")
+
+
+def test_scene_reviews_salvage_trailing_garbage(tmp_path: Path) -> None:
+    board = Board.create(tmp_path / "board", _meta())
+    board.save_scene_review(_review(1))
+    path = tmp_path / "board" / "scene_reviews" / "scene_1.json"
+    path.write_text(path.read_text(encoding="utf-8") + "\n  }\n}", encoding="utf-8")
+    assert [r.scene_number for r in board.scene_reviews()] == [1]
+
+
+def test_concurrent_saves_serialize_without_corruption(tmp_path: Path) -> None:
+    """Simultaneous saves through SEPARATE Board instances on one root must behave like
+    sequential saves: every version assigned once, every predecessor archived, file valid."""
+    root = tmp_path / "board"
+    board = Board.create(root, _meta())
+    board.save("storyline", _storyline("base"))
+    n = 8
+    barrier = threading.Barrier(n)
+    errors: list[Exception] = []
+
+    def save(i: int) -> None:
+        try:
+            barrier.wait(timeout=30)
+            Board.open(root).save("storyline", _storyline(f"thread {i}"))
+        except Exception as exc:  # noqa: BLE001 — collected for the assertion below
+            errors.append(exc)
+
+    _run_all([threading.Thread(target=save, args=(i,)) for i in range(n)])
+    assert errors == []
+    loaded = board.load("storyline")
+    assert isinstance(loaded, Storyline)
+    assert loaded.version == n + 1
+    assert board.versions("storyline") == list(range(1, n + 1))
+
+
+def test_transaction_makes_read_merge_write_atomic(tmp_path: Path) -> None:
+    """save_script_chapter's pattern: load script, merge one chapter, save. Under a
+    parallel batch every chapter must survive — no lost updates between load and save."""
+    root = tmp_path / "board"
+    board = Board.create(root, _meta())
+    board.save(
+        "script",
+        Script(language="de", lines=[ScriptLine(chapter=1, scene_number=1, text="eins")]),
+    )
+    chapters = list(range(2, 8))
+    barrier = threading.Barrier(len(chapters))
+    errors: list[Exception] = []
+
+    def add_chapter(chapter: int) -> None:
+        try:
+            barrier.wait(timeout=30)
+            b = Board.open(root)
+            with b.transaction():
+                existing = b.load("script")
+                assert isinstance(existing, Script)
+                merged = [
+                    *existing.lines,
+                    ScriptLine(chapter=chapter, scene_number=1, text=f"kapitel {chapter}"),
+                ]
+                b.save("script", Script(language="de", lines=merged))
+        except Exception as exc:  # noqa: BLE001 — collected for the assertion below
+            errors.append(exc)
+
+    _run_all([threading.Thread(target=add_chapter, args=(c,)) for c in chapters])
+    assert errors == []
+    final = board.load("script")
+    assert isinstance(final, Script)
+    assert sorted(line.chapter for line in final.lines) == list(range(1, 8))
