@@ -21,6 +21,7 @@ from .audio import AudioOverlay
 from .captions import build_ass, group_caption_lines
 from .captions_source import timeline_caption_words, voiceover_caption_words
 from .mp4 import _DEFAULT_DISCLOSURE, VideoTransition, render_clips_mp4, render_multilane_mp4
+from . import groesse
 from .reel import kennzeichnung_text
 from .srt import sequence_transcript_to_srt
 from .sync import assert_or_fix_media_sync
@@ -575,6 +576,11 @@ def handle_render(ctx: JobContext) -> dict[str, Any]:
             fix=True,
         )
         size_bytes = os.path.getsize(dest)
+        max_bytes = opts.get("max_bytes")
+        if isinstance(max_bytes, int) and max_bytes > 0 and size_bytes > max_bytes:
+            # Groessengrenze (Video-Claw): neu kodieren oder mit Grund scheitern (except unten).
+            dauer_s = expected_frames * project["sequence_rate_den"] / project["sequence_rate_num"]
+            size_bytes = groesse.einhalten(dest, max_bytes=max_bytes, dauer_s=dauer_s)
     except Exception as e:  # noqa: BLE001 - persist the failure, drop partial output, re-raise
         repos.set_export_error(ctx.db, export_id, str(e)[-500:])
         if dest.exists():

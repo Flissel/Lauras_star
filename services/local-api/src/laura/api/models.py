@@ -803,6 +803,15 @@ class ReelRenderRequest(BaseModel):
         ),
     )
 
+    # Groessengrenze (Video-Claw, 17.10.2026): groessere fertige Datei wird mit passender
+    # Bitrate neu kodiert, sonst Fehler mit Grund. sales-claw nimmt hoechstens 15 MB.
+    max_bytes: int | None = Field(
+        default=None,
+        ge=1_000_000,
+        le=500_000_000,
+        description="Hoechstgroesse der fertigen Datei in Bytes; None = keine Grenze.",
+    )
+
     @field_validator("disclosure_text", mode="before")
     @classmethod
     def _disclosure_required(cls, v: str | None) -> str:

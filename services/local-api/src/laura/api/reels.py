@@ -58,6 +58,8 @@ def render_reel(
     }
     # Nur gesetzt, wenn abweichend: alte Aufrufer behalten ihre Optionen (und damit ihren
     # Rezept-Hash) byte-gleich.
+    if body.max_bytes is not None:
+        options["max_bytes"] = body.max_bytes
     if body.kennzeichnung == "auto":
         options["kennzeichnung"] = "auto"
         options["disclosure_text"] = None
