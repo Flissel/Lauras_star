@@ -188,13 +188,32 @@ def kennzeichnung_text(arten: set[str]) -> str | None:
     return "Gesicht und Stimme: KI"
 
 
-def resolve_font() -> str:
-    """ffmpeg-drawtext-safe font path. LAURA_FONT env overrides; default Windows Arial Bold.
+#: Fallback-Schriften in dieser Reihenfolge, wenn LAURA_FONT fehlt. Die erste VORHANDENE
+#: gewinnt. Vorher stand hier nur die Windows-Arial - auf der Linux-VM (keine LAURA_FONT
+#: gesetzt, 17.10.2026 gemessen) liess das jeden drawtext (Hook, KI-Hinweis) scheitern.
+_FONT_KANDIDATEN: tuple[str, ...] = (
+    r"C:/Windows/Fonts/arialbd.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+)
 
-    The Windows drive colon must be escaped as a DOUBLE backslash for the filtergraph
-    (proven: ``C\\:/Windows/Fonts/arialbd.ttf`` works, single backslash fails).
-    """
+
+def _drawtext_pfad(pfad: str) -> str:
+    # Windows-Laufwerksdoppelpunkt als DOPPELTER Backslash (bewiesen: ``C\\:/Windows/...``
+    # geht, einfacher Backslash nicht); Pfade ohne Laufwerk bleiben unveraendert.
+    return pfad.replace(":", r"\\:", 1) if len(pfad) > 1 and pfad[1] == ":" else pfad
+
+
+def resolve_font() -> str:
+    """ffmpeg-drawtext-safe font path. LAURA_FONT env overrides; sonst die erste vorhandene
+    Schrift aus ``_FONT_KANDIDATEN`` (Windows-Arial, dann DejaVu unter Linux)."""
     import os
 
-    cand = os.environ.get("LAURA_FONT") or r"C:/Windows/Fonts/arialbd.ttf"
-    return cand.replace(":", r"\\:", 1)  # escape only the drive colon
+    gesetzt = os.environ.get("LAURA_FONT")
+    if gesetzt:
+        return _drawtext_pfad(gesetzt)
+    for kandidat in _FONT_KANDIDATEN:
+        if os.path.isfile(kandidat):
+            return _drawtext_pfad(kandidat)
+    return _drawtext_pfad(_FONT_KANDIDATEN[0])
