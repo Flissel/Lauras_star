@@ -811,6 +811,10 @@ class ReelRenderRequest(BaseModel):
         le=500_000_000,
         description="Hoechstgroesse der fertigen Datei in Bytes; None = keine Grenze.",
     )
+    # Logo oben einblenden (Video-Claw, 17.10.2026); Bild-Asset desselben Projekts.
+    logo_asset_id: str | None = None
+    logo_position: Literal["oben_rechts", "oben_links", "oben_mitte"] = "oben_rechts"
+    logo_breite_prozent: int = Field(default=14, ge=8, le=25)
 
     @field_validator("disclosure_text", mode="before")
     @classmethod

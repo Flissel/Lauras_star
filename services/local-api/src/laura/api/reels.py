@@ -58,6 +58,13 @@ def render_reel(
     }
     # Nur gesetzt, wenn abweichend: alte Aufrufer behalten ihre Optionen (und damit ihren
     # Rezept-Hash) byte-gleich.
+    if body.logo_asset_id:
+        logo = repos.get_asset(db, body.logo_asset_id)
+        if logo is None or logo["project_id"] != tl["project_id"] or logo["type"] != "image":
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                "logo_asset_id muss ein Bild-Asset dieses Projekts sein")
+        options.update(logo_asset_id=body.logo_asset_id, logo_position=body.logo_position,
+                       logo_breite_prozent=body.logo_breite_prozent)
     if body.max_bytes is not None:
         options["max_bytes"] = body.max_bytes
     if body.kennzeichnung == "auto":

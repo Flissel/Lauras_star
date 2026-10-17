@@ -21,7 +21,7 @@ from .audio import AudioOverlay
 from .captions import build_ass, group_caption_lines
 from .captions_source import timeline_caption_words, voiceover_caption_words
 from .mp4 import _DEFAULT_DISCLOSURE, VideoTransition, render_clips_mp4, render_multilane_mp4
-from . import groesse
+from . import groesse, logo
 from .reel import kennzeichnung_text
 from .srt import sequence_transcript_to_srt
 from .sync import assert_or_fix_media_sync
@@ -576,6 +576,15 @@ def handle_render(ctx: JobContext) -> dict[str, Any]:
             fix=True,
         )
         size_bytes = os.path.getsize(dest)
+        if opts.get("logo_asset_id"):
+            # Logo (Video-Claw) VOR der Groessengrenze, damit die Grenze auch danach stimmt.
+            logo_asset = repos.get_asset(ctx.db, str(opts["logo_asset_id"]))
+            if logo_asset is None:
+                raise ValueError("Logo-Asset nicht gefunden")
+            logo.einblenden(dest, Path(logo_asset["source_path"]),
+                            position=str(opts.get("logo_position") or "oben_rechts"),
+                            breite_prozent=int(opts.get("logo_breite_prozent") or 14))
+            size_bytes = os.path.getsize(dest)
         max_bytes = opts.get("max_bytes")
         if isinstance(max_bytes, int) and max_bytes > 0 and size_bytes > max_bytes:
             # Groessengrenze (Video-Claw): neu kodieren oder mit Grund scheitern (except unten).
