@@ -50,6 +50,22 @@ def _find_timecode(video: dict[str, Any] | None, fmt: dict[str, Any]) -> str | N
     return None
 
 
+_BILD_FORMATE = frozenset({"image2", "png_pipe", "jpeg_pipe", "webp_pipe", "bmp_pipe"})
+_BILD_CODECS = frozenset({"png", "mjpeg", "webp", "bmp"})
+
+
+def _ist_bild(fmt: dict[str, Any], video: dict[str, Any] | None,
+              audio: dict[str, Any] | None, duration_frames: int | None) -> bool:
+    """Ein Bild: Bild-Container ODER ein Bild-Codec mit hoechstens einem Frame, ohne Ton.
+    Ein Motion-JPEG-Video (mjpeg, viele Frames) bleibt ein Video."""
+    if video is None or audio is not None:
+        return False
+    formate = set(str(fmt.get("format_name") or "").split(","))
+    if formate & _BILD_FORMATE:
+        return True
+    return video.get("codec_name") in _BILD_CODECS and (duration_frames or 0) <= 1
+
+
 def parse_probe(data: dict[str, Any]) -> AssetProbe:
     streams = data.get("streams", [])
     fmt = data.get("format", {})
@@ -82,6 +98,18 @@ def parse_probe(data: dict[str, Any]) -> AssetProbe:
             sample_rate = int(audio["sample_rate"])
         except ValueError:
             sample_rate = None
+
+    if _ist_bild(fmt, video, audio, duration_frames):
+        # Standbild (Video-Claw, 17.10.2026): eigener Typ, damit es nicht als
+        # Ein-Frame-"Video" in Proxy/Analyse faellt; Clips daraus macht baustein.standbild.
+        return AssetProbe(
+            type="image", duration_frames=None, rate_num=None, rate_den=None,
+            audio_sample_rate=None, start_timecode=None,
+            width=int(video["width"]) if video and "width" in video else None,
+            height=int(video["height"]) if video and "height" in video else None,
+            codec_video=video.get("codec_name") if video else None, codec_audio=None,
+            is_vfr=False,
+        )
 
     return AssetProbe(
         type="video" if video is not None else "audio",

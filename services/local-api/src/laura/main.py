@@ -26,6 +26,7 @@ from .api import (
     assets,
     audio,
     batch,
+    bausteine,
     chat,
     demo,
     generate,
@@ -51,6 +52,7 @@ from .api.ratelimit import RateLimiter, make_rate_limit_middleware
 from .config import Settings, ensure_workspace
 from .db.database import create_database
 from .demo.handlers import register_demo_handlers
+from .bausteine.handlers import register_bausteine_handlers
 from .generate.handlers import register_generate_handlers
 from .ingest.handlers import register_ingest_handlers
 from .jobs import JobRunner, default_registry
@@ -79,6 +81,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     register_visual_handlers(registry)
     register_shorts_render_handler(registry)
     register_generate_handlers(registry)
+    register_bausteine_handlers(registry)
     register_short_creator_handlers(registry)
     runner = JobRunner(
         db, registry,
@@ -167,6 +170,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(orchestration.router)
     app.include_router(demo.router)
     app.include_router(generate.router)
+    app.include_router(bausteine.router)
     app.include_router(short_creator.router)
     app.include_router(chat.router)
     return app
