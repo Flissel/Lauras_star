@@ -114,6 +114,9 @@ def create_narrated_reel(
         "render": body.render,
         "caption_preset": body.caption_preset,
     }
+    # Nur bei Hochkant-Ausgabe: alte Anfragen behalten ihren Idempotenz-Schluessel.
+    if body.ausgabe == "reel":
+        key_payload.update(ausgabe="reel", hook_text=body.hook_text, max_bytes=body.max_bytes)
     idempotency_key = idempotency_key_for("ai.narrated_reel", key_payload)
     # Accepted race: two simultaneous identical POSTs both read "no existing job" here and
     # both proceed to create_timeline below, orphaning one timeline. Single-user local app —

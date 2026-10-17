@@ -1034,6 +1034,18 @@ class NarratedReelRequest(BaseModel):
     runtime_id: str | None = None
     render: bool = True
     caption_preset: Literal["reels", "tiktok", "shorts", "wide"] = "wide"
+    # Hochkant-Ausgabe (Video-Claw, 17.10.2026): "reel" haengt den Render mit Reel-Optionen
+    # an (9:16, caption_preset "reels", KI-Hinweis nach Inhalt). Die drei Felder darunter
+    # gelten nur dort; ohne "reel" werden sie abgelehnt statt still ignoriert.
+    ausgabe: Literal["quer", "reel"] = "quer"
+    hook_text: str | None = Field(default=None, max_length=120)
+    max_bytes: int | None = Field(default=None, ge=1_000_000, le=500_000_000)
+
+    @model_validator(mode="after")
+    def _reel_felder_nur_bei_reel(self) -> NarratedReelRequest:
+        if self.ausgabe != "reel" and (self.hook_text is not None or self.max_bytes is not None):
+            raise ValueError("hook_text und max_bytes gelten nur mit ausgabe='reel'")
+        return self
 
 
 class NarratedReelAccepted(BaseModel):

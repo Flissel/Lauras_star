@@ -127,6 +127,14 @@ def idempotency_key_for(kind: str, payload: dict[str, Any]) -> str | None:
             "render": payload.get("render"),
             "caption_preset": payload.get("caption_preset"),
         }
+        # Hochkant-Ausgabe (17.10.2026): nur dann im Schluessel, damit alte Schluessel gleich
+        # bleiben - und ein Reel nicht den gleichlautenden Quer-Auftrag wiederfindet.
+        if payload.get("ausgabe") == "reel":
+            parts.update(
+                ausgabe="reel",
+                hook_text=payload.get("hook_text"),
+                max_bytes=payload.get("max_bytes"),
+            )
         return f"ai.narrated_reel:{_sha256_of(parts)}"
 
     return None

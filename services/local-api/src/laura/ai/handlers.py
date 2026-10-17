@@ -955,6 +955,17 @@ def handle_narrated_reel(ctx: JobContext) -> dict[str, Any]:
                     "caption_source": "voiceover",
                     "caption_preset": payload.get("caption_preset") or "wide",
                 }
+                if payload.get("ausgabe") == "reel":
+                    # Hochkant gleich mit Reel-Optionen (sonst renderte der Job quer).
+                    options.update(
+                        vertical=True,
+                        caption_preset="reels",
+                        hook_text=payload.get("hook_text"),
+                        kennzeichnung="auto",
+                        disclosure_text=None,
+                    )
+                    if payload.get("max_bytes"):
+                        options["max_bytes"] = int(payload["max_bytes"])
                 exp = repos.create_export(
                     ctx.db,
                     project_id=timeline["project_id"],
