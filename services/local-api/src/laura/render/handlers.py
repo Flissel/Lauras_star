@@ -21,6 +21,7 @@ from .audio import AudioOverlay
 from .captions import build_ass, group_caption_lines
 from .captions_source import timeline_caption_words, voiceover_caption_words
 from .mp4 import _DEFAULT_DISCLOSURE, VideoTransition, render_clips_mp4, render_multilane_mp4
+from .reel import kennzeichnung_text
 from .srt import sequence_transcript_to_srt
 from .sync import assert_or_fix_media_sync
 
@@ -237,6 +238,42 @@ def _timeline_is_synthetic(
     return row is not None
 
 
+_GESICHT_EFFEKTE = frozenset({"reenact", "lipsync"})
+
+
+def _synthetic_kinds(db: Database, timeline_id: str) -> set[str]:
+    """Welche Arten KI stecken in der Timeline? (fuer ``kennzeichnung="auto"``)
+
+    - ``stimme``: ein Tonstueck aus einem synthetischen Voiceover-Asset - egal mit welchem
+      mix_mode (die alte Pruefung sah eine untergemischte KI-Stimme nicht).
+    - ``gesicht``: ein Videoclip aus einem Reenact-/Lipsync-Asset.
+    - ``synthetisch``: alles andere Kuenstliche - sonstige synthetische Assets, Ersatzclips
+      (role='replace') und ersetzter/stummgeschalteter Originalton aus Nicht-KI-Quellen
+      (wie bisher als synthetisch gewertet).
+    """
+    arten: set[str] = set()
+    with db.connection() as conn:
+        for rolle, synth, effekt in conn.execute(
+            "SELECT tc.role, a.synthetic, a.ai_effect FROM timeline_clips tc "
+            "LEFT JOIN media_assets a ON a.id = tc.asset_id WHERE tc.timeline_id = ?",
+            (timeline_id,),
+        ).fetchall():
+            if synth:
+                arten.add("gesicht" if effekt in _GESICHT_EFFEKTE else "synthetisch")
+            elif rolle == "replace":
+                arten.add("synthetisch")
+        for mix, synth, effekt in conn.execute(
+            "SELECT ac.mix_mode, a.synthetic, a.ai_effect FROM timeline_audio_clips ac "
+            "LEFT JOIN media_assets a ON a.id = ac.asset_id WHERE ac.timeline_id = ?",
+            (timeline_id,),
+        ).fetchall():
+            if synth:
+                arten.add("stimme" if effekt == "voiceover" else "synthetisch")
+            elif mix in {"replace_original", "mute_original"}:
+                arten.add("synthetisch")
+    return arten
+
+
 def _timeline_srt_segments(
     db: Database,
     timeline_id: str,
@@ -413,7 +450,10 @@ def handle_render(ctx: JobContext) -> dict[str, Any]:
     # did not already supply a value. An explicit value (even blank) goes through
     # _effective_disclosure unchanged — only None triggers the auto-force.
     disc_text: str | None = opts.get("disclosure_text")  # type: ignore[assignment]
-    if disc_text is None and _timeline_is_synthetic(ctx.db, exp["timeline_id"], audio_overlays):
+    if opts.get("kennzeichnung") == "auto":
+        # Hinweis nach Inhalt (Video-Claw, 17.10.2026): Text aus den KI-Arten, None ohne KI.
+        disc_text = kennzeichnung_text(_synthetic_kinds(ctx.db, exp["timeline_id"]))
+    elif disc_text is None and _timeline_is_synthetic(ctx.db, exp["timeline_id"], audio_overlays):
         disc_text = _DEFAULT_DISCLOSURE
 
     caption_ass: str | None = None

@@ -790,6 +790,18 @@ class ReelRenderRequest(BaseModel):
     # Optional quality gate: 422 when persisted quality is computed and below this threshold.
     # None means no gate (unverified stamp applied when quality is not computed).
     min_quality: float | None = Field(default=None, ge=0.0, le=1.0)
+    # KI-Hinweis nach Art des KI-Anteils (Video-Claw, 17.10.2026). "fest" = bisheriges
+    # Verhalten (disclosure_text wird eingebrannt). "auto" = disclosure_text wird ignoriert;
+    # der Render bestimmt den Text aus dem Inhalt ("Stimme: KI", "Gesicht: KI",
+    # "KI · synthetisch") und blendet bei reinem Echtmaterial keinen ein.
+    kennzeichnung: Literal["fest", "auto"] = Field(
+        default="fest",
+        description=(
+            "'fest': disclosure_text wird eingebrannt (bisher). 'auto': Hinweis nach Inhalt - "
+            "'Stimme: KI', 'Gesicht: KI' oder 'KI · synthetisch'; kein Hinweis, wenn nichts "
+            "kuenstlich ist. Jede KI-Stimme zaehlt, auch untergemischt."
+        ),
+    )
 
     @field_validator("disclosure_text", mode="before")
     @classmethod

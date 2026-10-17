@@ -56,6 +56,11 @@ def render_reel(
         "max_duration_seconds": body.max_duration_seconds,
         **gate,
     }
+    # Nur gesetzt, wenn abweichend: alte Aufrufer behalten ihre Optionen (und damit ihren
+    # Rezept-Hash) byte-gleich.
+    if body.kennzeichnung == "auto":
+        options["kennzeichnung"] = "auto"
+        options["disclosure_text"] = None
 
     # Mint a short_run so the ledger tracks this build attempt from the moment it is enqueued.
     # Resolve the source asset for content-addressing (may be None for non-asset timelines).

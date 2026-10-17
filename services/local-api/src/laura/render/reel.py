@@ -170,6 +170,24 @@ def reel_blur_fill_graph(
     return ";".join(parts)
 
 
+def kennzeichnung_text(arten: set[str]) -> str | None:
+    """Hinweistext aus den KI-Arten eines Videos (``kennzeichnung="auto"``).
+
+    ``arten`` kommt aus ``render.handlers._synthetic_kinds``: ``stimme`` (KI-Stimme),
+    ``gesicht`` (Reenact/Lipsync), ``synthetisch`` (alles andere Kuenstliche). Alles
+    Unbestimmte gewinnt den allgemeinen Hinweis; ohne KI-Anteil gibt es keinen.
+    """
+    if not arten:
+        return None
+    if "synthetisch" in arten:
+        return "KI · synthetisch"
+    if arten == {"stimme"}:
+        return "Stimme: KI"
+    if arten == {"gesicht"}:
+        return "Gesicht: KI"
+    return "Gesicht und Stimme: KI"
+
+
 def resolve_font() -> str:
     """ffmpeg-drawtext-safe font path. LAURA_FONT env overrides; default Windows Arial Bold.
 
