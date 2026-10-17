@@ -48,6 +48,9 @@ _MEDIA_SUFFIXES: frozenset[str] = frozenset({
     ".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi", ".flv", ".wmv", ".mpg",
     ".mpeg", ".ts", ".m2ts", ".mxf", ".ogv", ".3gp",
     ".mp3", ".m4a", ".aac", ".wav", ".flac", ".ogg", ".opus", ".wma",
+    # Bilder (Video-Claw, 17.10.2026): Markenbilder kommen per Direktlink aus dem
+    # Marketing-Medienordner; ohne diese Endungen liefen sie durch yt-dlp.
+    ".png", ".jpg", ".jpeg", ".webp",
 })
 
 
