@@ -65,6 +65,12 @@ services:
       # unterscheidet sich (dort die Tailscale-Adresse des Windows-Rechners).
       # Die Vorgabe bleibt der bisherige Wert, damit auf Windows nichts kippt.
       LAURA_ANALYSIS_URL: ${LAURA_ANALYSIS_URL:-http://host.docker.internal:8896}
+      # Stimme fuer Voiceover/Narrated Reel (Video-Claw, 17.10.2026): auf der VM der deutsche
+      # Sprech-Dienst des Marketing-PCs ueber Tailscale (/voiceover, Vertrag wie tts-sidecar).
+      # Leer = Vorgaben des Backends (127.0.0.1:8898, Backend aus der Anfrage).
+      LAURA_VOICEOVER_URL: ${LAURA_VOICEOVER_URL:-}
+      LAURA_VOICEOVER_BACKEND: ${LAURA_VOICEOVER_BACKEND:-}
+      LAURA_VOICEOVER_TIMEOUT: ${LAURA_VOICEOVER_TIMEOUT:-}
     extra_hosts:
       # Docker Desktop legt den Namen von selbst an; auf einem Linux-Host
       # nicht. Damit laeuft dieselbe Datei auf beiden.
