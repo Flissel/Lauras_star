@@ -829,7 +829,8 @@ def handle_narrated_reel(ctx: JobContext) -> dict[str, Any]:
                     cancelled = True
                     break
 
-                text = str(beat["text"])
+                text = str(beat.get("text") or "")
+                originalton = bool(beat.get("originalton"))
                 asset_id = str(beat["asset_id"])
                 src_in = int(beat["src_in_frame"])
                 pad_frames = (
@@ -849,6 +850,21 @@ def handle_narrated_reel(ctx: JobContext) -> dict[str, Any]:
                     raise ValueError(
                         f"ai.narrated_reel: beat {i}: src_in_frame is at/after the asset end"
                     )
+
+                if originalton:
+                    # Phase F (18.10.2026): die Person spricht selbst - kein Voiceover, der Clip
+                    # laeuft genau src_in..src_out mit seinem Originalton (kein replace-Overlay).
+                    src_out = min(int(beat["src_out_frame"]), int(asset_duration))
+                    if int(beat["src_out_frame"]) > int(asset_duration):
+                        warnings.append(f"beat {i}: clipped to asset end")
+                    clip = EditClip(asset_id=asset_id, src_in_frame=src_in, src_out_frame_exclusive=src_out,
+                                    seq_in_frame=0, seq_out_frame_exclusive=0, lane=0)
+                    edit_clips = ordered(append_clip(edit_clips, clip))
+                    repos.replace_timeline_clips(ctx.db, timeline_id, [c.to_row() for c in edit_clips])
+                    placed = edit_clips[-1]
+                    beats_result.append({"voice_asset_id": None, "measured_frames": 0, "originalton": True,
+                                         "seq_in": placed.seq_in_frame, "seq_out": placed.seq_out_frame_exclusive})
+                    continue
 
                 # Natural-mode hint only -- never the desired length (see
                 # `_synthesize_voiceover_asset`'s docstring). `remaining` (uncapped) still
@@ -959,6 +975,7 @@ def handle_narrated_reel(ctx: JobContext) -> dict[str, Any]:
                     # Hochkant gleich mit Reel-Optionen (sonst renderte der Job quer).
                     options.update(
                         vertical=True,
+                        caption_source="gemischt",   # Originalton-Beats zeigen ihr Transkript
                         caption_preset="reels",
                         hook_text=payload.get("hook_text"),
                         kennzeichnung="auto",

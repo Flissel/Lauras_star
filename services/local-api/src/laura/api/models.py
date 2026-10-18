@@ -811,6 +811,9 @@ class ReelRenderRequest(BaseModel):
         le=500_000_000,
         description="Hoechstgroesse der fertigen Datei in Bytes; None = keine Grenze.",
     )
+    # Untertitelquelle (Phase F, 18.10.2026); None = bisherige Vorgabe des Renderers ("auto").
+    # "gemischt" = Voiceover-Text fuer eingesprochene Beats + Transkript fuer Originalton.
+    caption_source: Literal["auto", "voiceover", "transcript", "gemischt"] | None = None
     # Logo oben einblenden (Video-Claw, 17.10.2026); Bild-Asset desselben Projekts.
     logo_asset_id: str | None = None
     logo_position: Literal["oben_rechts", "oben_links", "oben_mitte"] = "oben_rechts"
@@ -1011,10 +1014,25 @@ class NarratedReelBeat(BaseModel):
     beat's clip is clamped to the asset's end.
     """
 
-    text: str = Field(min_length=1)
+    text: str = ""
     asset_id: str
     src_in_frame: int = Field(ge=0)
     pad_frames: int = Field(default=12, ge=0, le=120)
+    # Originalton (Video-Claw Phase F, 18.10.2026): die Person im Video spricht selbst - kein
+    # Voiceover, der Clip laeuft genau src_in_frame..src_out_frame mit seinem eigenen Ton.
+    originalton: bool = False
+    src_out_frame: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def _text_oder_originalton(self) -> NarratedReelBeat:
+        if self.originalton:
+            if self.src_out_frame is None or self.src_out_frame <= self.src_in_frame:
+                raise ValueError("originalton braucht src_out_frame > src_in_frame")
+        elif not self.text.strip():
+            raise ValueError("text fehlt (oder originalton=true mit src_out_frame)")
+        elif self.src_out_frame is not None:
+            raise ValueError("src_out_frame gilt nur mit originalton=true")
+        return self
 
 
 class NarratedReelRequest(BaseModel):

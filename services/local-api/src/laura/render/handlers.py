@@ -242,6 +242,24 @@ def _timeline_is_synthetic(
 _GESICHT_EFFEKTE = frozenset({"reenact", "lipsync"})
 
 
+def _voiceover_spannen(db: Database, timeline_id: str) -> list[tuple[int, int]]:
+    """Sequenz-Spannen [in, out) der KI-Voiceover-Tonstuecke einer Timeline."""
+    with db.connection() as conn:
+        return [(int(a), int(b)) for a, b in conn.execute(
+            "SELECT ac.seq_in_frame, ac.seq_out_frame_exclusive FROM timeline_audio_clips ac "
+            "JOIN media_assets a ON a.id = ac.asset_id WHERE ac.timeline_id = ? AND a.ai_effect = 'voiceover'",
+            (timeline_id,)).fetchall()]
+
+
+def gemischte_caption_words(voiceover: list, transkript: list, spannen: list[tuple[int, int]]) -> list:
+    """Voiceover-Woerter + Transkript-Woerter AUSSERHALB der Voiceover-Spannen, nach Startframe.
+    Ohne Spannen-Pruefung kaemen unter einem Voiceover beide Texte uebereinander."""
+    def unter_voiceover(start: int) -> bool:
+        return any(a <= start < b for a, b in spannen)
+    return sorted([*voiceover, *(w for w in transkript if not unter_voiceover(int(w[1])))],
+                  key=lambda w: int(w[1]))
+
+
 def _synthetic_kinds(db: Database, timeline_id: str) -> set[str]:
     """Welche Arten KI stecken in der Timeline? (fuer ``kennzeichnung="auto"``)
 
@@ -465,9 +483,17 @@ def handle_render(ctx: JobContext) -> dict[str, Any]:
         # prefer voiceover words, fall back to transcript only when voiceover is empty
         # (e.g. no voiceover clips, or clips without a sidecar).
         source_mode = _option_str(
-            opts, "caption_source", "auto", {"auto", "voiceover", "transcript"}
+            opts, "caption_source", "auto", {"auto", "voiceover", "transcript", "gemischt"}
         )
-        if source_mode == "voiceover":
+        if source_mode == "gemischt":
+            # Phase F (18.10.2026): eingesprochene Beats zeigen den vorgegebenen Text, Originalton-
+            # Abschnitte (Person spricht selbst) das Transkript - beides, nach Zeit sortiert.
+            words = gemischte_caption_words(
+                voiceover_caption_words(ctx.db, exp["timeline_id"]),
+                timeline_caption_words(ctx.db, exp["timeline_id"]),
+                _voiceover_spannen(ctx.db, exp["timeline_id"]),
+            )
+        elif source_mode == "voiceover":
             words = voiceover_caption_words(ctx.db, exp["timeline_id"])
         elif source_mode == "transcript":
             words = timeline_caption_words(ctx.db, exp["timeline_id"])

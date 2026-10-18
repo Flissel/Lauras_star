@@ -65,6 +65,8 @@ def render_reel(
                                 "logo_asset_id muss ein Bild-Asset dieses Projekts sein")
         options.update(logo_asset_id=body.logo_asset_id, logo_position=body.logo_position,
                        logo_breite_prozent=body.logo_breite_prozent)
+    if body.caption_source is not None:
+        options["caption_source"] = body.caption_source
     if body.max_bytes is not None:
         options["max_bytes"] = body.max_bytes
     if body.kennzeichnung == "auto":

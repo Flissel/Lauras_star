@@ -109,6 +109,12 @@ def _build_dialogue_text(
 # ---------------------------------------------------------------------------
 
 
+def _satzende(vorher: str, naechstes: str) -> bool:
+    ende = vorher.rstrip("\"'»«)”“")
+    return bool(ende) and ende[-1] in ".!?…" and bool(naechstes) and (
+        naechstes.lstrip("\"'»«(„“")[:1].isupper() or naechstes[:1].isdigit())
+
+
 def group_caption_lines(
     words: list[tuple[str, int, int]],
     *,
@@ -124,7 +130,10 @@ def group_caption_lines(
       ``max_chars_per_line`` characters (at fontsize 72 on a 1080px frame,
       ~31 rendered chars fit — longer lines spill past both edges), **or**
     - the gap between the previous word's ``seq_end`` and the next word's
-      ``seq_start`` exceeds ``max_gap_frames``.
+      ``seq_start`` exceeds ``max_gap_frames``, **or**
+    - the previous word ends a sentence (``.``/``!``/``?``/``…``) and the next word starts
+      with a capital letter or digit (18.10.2026: without this, lines like "Stimme. Die
+      Untertitel" ran across sentences; "z.B. ein" stays together).
 
     A single word longer than the budget still gets its own line.  Words are
     never reordered or dropped.  Empty input returns ``[]``.
@@ -144,6 +153,7 @@ def group_caption_lines(
                 len(current) >= max_words_per_line
                 or gap > max_gap_frames
                 or current_chars + 1 + len(word[0]) > max_chars_per_line
+                or _satzende(current[-1][0], word[0])
             ):
                 lines.append(current)
                 current = []

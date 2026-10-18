@@ -44,7 +44,7 @@ def test_ausgabe_reel_haengt_reel_render_an(client: TestClient, monkeypatch: pyt
     o = _lauf(client, monkeypatch, tmp_path, {"ausgabe": "reel", "hook_text": "Drei Fehler",
                                               "max_bytes": 15_000_000})
     assert o["vertical"] is True and o["captions"] is True
-    assert o["caption_source"] == "voiceover" and o["caption_preset"] == "reels"
+    assert o["caption_source"] == "gemischt" and o["caption_preset"] == "reels"
     assert o["hook_text"] == "Drei Fehler" and o["max_bytes"] == 15_000_000
     assert o["kennzeichnung"] == "auto" and o["disclosure_text"] is None
 

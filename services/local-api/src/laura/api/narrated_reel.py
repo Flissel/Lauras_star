@@ -93,6 +93,18 @@ def create_narrated_reel(
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
                 f"beat {i}: src_in_frame must be less than the asset's duration_frames",
             )
+        if beat.originalton:
+            # Originalton (Phase F): der Ausschnitt muss im Video liegen, Ton haben und kurz bleiben.
+            rate = project["sequence_rate_num"] / project["sequence_rate_den"]
+            if beat.src_out_frame is None or beat.src_out_frame > duration_frames:
+                raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
+                                    f"beat {i}: src_out_frame liegt hinter dem Video-Ende")
+            if (beat.src_out_frame - beat.src_in_frame) > 60 * rate:
+                raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
+                                    f"beat {i}: Originalton-Ausschnitt hoechstens 60 s")
+            if not asset.get("audio_sample_rate"):
+                raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
+                                    f"beat {i}: Video hat keinen Ton fuer originalton")
 
     _validate_runtime(db, body.runtime_id, "voice")
 
@@ -104,7 +116,9 @@ def create_narrated_reel(
     # after the (would-be duplicate) timeline already exists, which is too late.
     key_payload: dict[str, Any] = {
         "project_id": project_id,
-        "beats": [b.model_dump() for b in body.beats],
+        # Originalton-Felder nur, wenn genutzt: alte Anfragen behalten ihren Idempotenz-Schluessel.
+        "beats": [b.model_dump() if b.originalton else b.model_dump(exclude={"originalton", "src_out_frame"})
+                  for b in body.beats],
         "crossfade_frames": body.crossfade_frames,
         "final_fade_frames": body.final_fade_frames,
         "backend": body.backend,
