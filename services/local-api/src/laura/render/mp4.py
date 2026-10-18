@@ -477,8 +477,14 @@ def _xfade_base_graph(
     timebase"); in a fold that mixes ``concat`` (passes input tb 1/1000000) and ``xfade`` (emits
     its own fps tb) the accumulator and the next raw clip otherwise disagree and the whole
     filtergraph fails to configure (-22). Pinning each segment + each fold output to ``AVTB``
-    makes every pairwise stage see matching timebases regardless of cut/crossfade ordering."""
+    makes every pairwise stage see matching timebases regardless of cut/crossfade ordering.
+
+    Each ``settb`` is preceded by ``fps=<sequence rate>`` (17.10.2026): with ffmpeg 7.1 (the Linux
+    VM) the frame rate was lost at the output of a fold stage, and the NEXT ``xfade`` aborted with
+    "The inputs needs to be a constant frame rate; current rate of 1/0" - every render with three
+    or more crossfaded clips failed there. ffmpeg 8 tolerated it, the mocked tests never saw it."""
     n = len(clips)
+    rate = f"fps={rate_num}/{rate_den}"
     parts: list[str] = []
     lens = [fout - fin for _, fin, fout in clips]
     # xfade is as strict as concat about frame parameters — mixed-size sources must be
@@ -490,7 +496,7 @@ def _xfade_base_graph(
         end = fout + reserve
         parts.append(
             f"[{i}:v]trim=start_frame={fin}:end_frame={end},"
-            f"setpts=PTS-STARTPTS,settb=AVTB{norm_chain}[v{i}]"
+            f"setpts=PTS-STARTPTS,{rate},settb=AVTB{norm_chain}[v{i}]"
         )
         if has_base_audio:
             if audio_flags[i]:
@@ -516,7 +522,7 @@ def _xfade_base_graph(
             nxt_v = f"xv{i}"
             parts.append(
                 f"[{v_acc}][v{i}]xfade=transition=fade:duration={dd}:offset={offset},"
-                f"settb=AVTB[{nxt_v}]"
+                f"{rate},settb=AVTB[{nxt_v}]"
             )
             v_acc = nxt_v
             if has_base_audio:
@@ -525,7 +531,7 @@ def _xfade_base_graph(
                 a_acc = nxt_a
         else:
             nxt_v = f"cv{i}"
-            parts.append(f"[{v_acc}][v{i}]concat=n=2:v=1:a=0,settb=AVTB[{nxt_v}]")
+            parts.append(f"[{v_acc}][v{i}]concat=n=2:v=1:a=0,{rate},settb=AVTB[{nxt_v}]")
             v_acc = nxt_v
             if has_base_audio:
                 nxt_a = f"ca{i}"
