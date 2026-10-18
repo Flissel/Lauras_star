@@ -67,6 +67,12 @@ def render_reel(
                        logo_breite_prozent=body.logo_breite_prozent)
     if body.caption_source is not None:
         options["caption_source"] = body.caption_source
+    if body.rahmung is not None:
+        options["rahmung"] = body.rahmung
+    if body.loudnorm is not None:
+        options["loudnorm"] = body.loudnorm
+    if body.untertitel_ersetzen:
+        options["untertitel_ersetzen"] = body.untertitel_ersetzen
     if body.max_bytes is not None:
         options["max_bytes"] = body.max_bytes
     if body.kennzeichnung == "auto":

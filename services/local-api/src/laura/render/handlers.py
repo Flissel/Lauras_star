@@ -251,6 +251,22 @@ def _voiceover_spannen(db: Database, timeline_id: str) -> list[tuple[int, int]]:
             (timeline_id,)).fetchall()]
 
 
+_SATZZEICHEN = ".,;:!?…\"'»«)”“"
+
+
+def untertitel_ersetzen(words: list, ersatz: dict[str, str] | None) -> list:
+    """Erkennungsfehler in Untertitel-Woertern ersetzen (ganzes Wort, Satzzeichen am Ende bleiben,
+    Zeiten bleiben). {"Kastermann": "Kunden"}: "Kastermann," -> "Kunden,"."""
+    if not ersatz:
+        return words
+    aus = []
+    for w in words:
+        text = str(w[0])
+        kern = text.rstrip(_SATZZEICHEN)
+        aus.append((ersatz[kern] + text[len(kern):], *w[1:]) if kern in ersatz else w)
+    return aus
+
+
 def gemischte_caption_words(voiceover: list, transkript: list, spannen: list[tuple[int, int]]) -> list:
     """Voiceover-Woerter + Transkript-Woerter AUSSERHALB der Voiceover-Spannen, nach Startframe.
     Ohne Spannen-Pruefung kaemen unter einem Voiceover beide Texte uebereinander."""
@@ -501,6 +517,8 @@ def handle_render(ctx: JobContext) -> dict[str, Any]:
             words = voiceover_caption_words(ctx.db, exp["timeline_id"])
             if not words:
                 words = timeline_caption_words(ctx.db, exp["timeline_id"])
+        ersatz = opts.get("untertitel_ersetzen")
+        words = untertitel_ersetzen(words, ersatz if isinstance(ersatz, dict) else None)
         lines = group_caption_lines(words)
         if lines:
             preset = _option_str(
@@ -586,6 +604,9 @@ def handle_render(ctx: JobContext) -> dict[str, Any]:
                 music_tracks=music_tracks if music_tracks else None,
                 audio_overlays=audio_overlays if audio_overlays else None,
                 vertical=bool(opts.get("vertical", False)),
+                # Feinschliff (18.10.2026): nur gesetzt, wenn angefordert - sonst Aufruf wie bisher.
+                **({"reel_blur_fill": True} if opts.get("rahmung") == "einpassen" else {}),
+                **({"loudnorm": True} if opts.get("loudnorm") is True else {}),
                 hook_text=opts.get("hook_text"),  # type: ignore[arg-type]
                 disclosure_text=disc_text,
                 caption_ass=caption_ass,

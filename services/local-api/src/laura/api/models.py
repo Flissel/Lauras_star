@@ -814,6 +814,25 @@ class ReelRenderRequest(BaseModel):
     # Untertitelquelle (Phase F, 18.10.2026); None = bisherige Vorgabe des Renderers ("auto").
     # "gemischt" = Voiceover-Text fuer eingesprochene Beats + Transkript fuer Originalton.
     caption_source: Literal["auto", "voiceover", "transcript", "gemischt"] | None = None
+    # Feinschliff (18.10.2026). None = bisheriges Verhalten.
+    # rahmung "einpassen": ganzes Bild auf weichem Hintergrund (Blur-Fill) statt Mittel-Zuschnitt -
+    # fuer Bildschirmaufnahmen und breite Folien. loudnorm: Lautheit auf -14 LUFS angleichen.
+    # untertitel_ersetzen: Erkennungsfehler in den Untertiteln korrigieren ({"Kastermann": "Kunde"}).
+    rahmung: Literal["zuschnitt", "einpassen"] | None = None
+    loudnorm: bool | None = None
+    untertitel_ersetzen: dict[str, str] | None = None
+
+    @field_validator("untertitel_ersetzen")
+    @classmethod
+    def _ersetzen_pruefen(cls, v: dict[str, str] | None) -> dict[str, str] | None:
+        if v is None:
+            return v
+        if len(v) > 30:
+            raise ValueError("untertitel_ersetzen: hoechstens 30 Eintraege")
+        for alt, neu in v.items():
+            if not alt or len(alt) > 40 or any(z.isspace() for z in alt) or not neu or len(neu) > 40:
+                raise ValueError("untertitel_ersetzen: je Eintrag ein Wort (1-40 Zeichen) -> Ersatz (1-40)")
+        return v
     # Logo oben einblenden (Video-Claw, 17.10.2026); Bild-Asset desselben Projekts.
     logo_asset_id: str | None = None
     logo_position: Literal["oben_rechts", "oben_links", "oben_mitte"] = "oben_rechts"

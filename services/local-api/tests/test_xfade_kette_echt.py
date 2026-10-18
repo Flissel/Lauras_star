@@ -45,3 +45,20 @@ def test_jede_faltstufe_traegt_feste_bildrate() -> None:
                                       rate_num=30, rate_den=1)
     video = [t for t in teile if "settb=AVTB" in t]
     assert video and all("fps=30/1,settb=AVTB" in t for t in video)
+
+
+def test_breite_clips_eingepasst_mit_lautheit(tmp_path: Path) -> None:
+    """Bildschirmaufnahme-Fall (18.10.2026): breite Quelle, Hochformat mit Blur-Fill, Ueberblendung, loudnorm."""
+    clips = []
+    for i, farbe in enumerate(["red", "green", "blue"]):
+        p = tmp_path / f"b{i}.mp4"
+        run_ffmpeg(["-f", "lavfi", "-i", f"color=c={farbe}:s=640x346:r=30:d=2", "-f", "lavfi", "-i",
+                    "sine=frequency=440:duration=2", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+                    str(p)])
+        clips.append((p, 0, 50))
+    uebergaenge = [VideoTransition(kind="crossfade", boundary_frame=50 * (i + 1), duration_frames=6) for i in range(2)]
+    ziel = tmp_path / "eingepasst.mp4"
+    render_clips_mp4(clips, ziel, rate_num=30, rate_den=1, video_transitions=uebergaenge, vertical=True,
+                     reel_blur_fill=True, loudnorm=True)
+    stroeme = {s["codec_type"]: s for s in probe(ziel)["streams"]}
+    assert (stroeme["video"]["width"], stroeme["video"]["height"]) == (1080, 1920) and "audio" in stroeme
