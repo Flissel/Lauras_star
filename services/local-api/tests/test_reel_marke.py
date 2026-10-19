@@ -74,8 +74,10 @@ def test_akzent_faerbt_genau_das_gesprochene_wort() -> None:
     ass = build_ass(LINIE, rate_num=30, rate_den=1, akzent="#5b3fd6")
     d = _dialoge(ass)
     assert len(d) == 3
-    an = "{\\1c&HD63F5B&}"
-    aus = "{\\1c&HFFFFFF&}"
+    # Marker (User-Entscheid 19.10. nach dem echten Reel): Wort bleibt weiss, breite Kontur in der Akzentfarbe -
+    # in reiner Akzentfarbe verschwand es auf der Akzent-Karte und auf dunklen Videos
+    an = "{\\3c&HD63F5B&\\bord9}"
+    aus = "{\\3c&H000000&\\bord3}"
     assert d[0].endswith(f",{an}So{aus} sieht es")
     assert d[1].endswith(f",So {an}sieht{aus} es")
     assert d[2].endswith(f",So sieht {an}es{aus}")
@@ -87,7 +89,7 @@ def test_akzent_faerbt_genau_das_gesprochene_wort() -> None:
 
 def test_akzent_im_normalmodus_ohne_hervorhebung() -> None:
     ass = build_ass(LINIE, rate_num=30, rate_den=1, akzent="#5b3fd6", mode="normal")
-    assert len(_dialoge(ass)) == 1 and "\\1c" not in ass
+    assert len(_dialoge(ass)) == 1 and "\\3c" not in ass
 
 
 def test_akzent_escaped_woerter() -> None:

@@ -86,10 +86,12 @@ def farbe_ass(hexfarbe: str) -> str:
 
 
 def _akzent_dialoge(words: Line, rate_num: int, rate_den: int, akzent: str, line_end: int) -> list[str]:
-    """Marke in Reels (C1): je Wort ein Ereignis, das nur dieses Wort in der Akzentfarbe zeigt - von seinem Start
+    """Marke in Reels (C1): je Wort ein Ereignis, das nur dieses Wort in der Akzentfarbe markiert - von seinem Start
     bis zum Start des naechsten (das letzte bis Zeilenende), luecken- und ueberlappungsfrei."""
-    # Inline-Farbe ohne Alpha: \1c&HBBGGRR& (farbe_ass liefert &H00BBGGRR fuer den Stil)
-    an, aus = f"{{\\1c&H{farbe_ass(akzent)[4:]}&}}", "{\\1c&HFFFFFF&}"
+    # Marker (User-Entscheid 19.10. nach dem echten Reel): das Wort bleibt weiss und bekommt eine breite Kontur in
+    # der Akzentfarbe - in reiner Akzentfarbe verschwand es auf der Akzent-Karte und auf dunklen Videos.
+    # Inline-Farbe ohne Alpha: \3c&HBBGGRR& (farbe_ass liefert &H00BBGGRR fuer den Stil); danach Stil-Kontur 3.
+    an, aus = f"{{\\3c&H{farbe_ass(akzent)[4:]}&\\bord9}}", "{\\3c&H000000&\\bord3}"
     texte = [_escape_ass_text(w[0]) for w in words]
     zeilen = []
     for i, (_t, start, _ende) in enumerate(words):
