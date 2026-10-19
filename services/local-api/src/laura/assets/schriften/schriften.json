@@ -1,0 +1,57 @@
+{
+ "bodoni": {
+  "datei": "bodoni-500-normal.ttf",
+  "gewicht": 500,
+  "voller_name": "Bodoni Moda 11pt Medium"
+ },
+ "cormorant": {
+  "datei": "cormorant-400-normal.ttf",
+  "gewicht": 400,
+  "voller_name": "Cormorant Garamond Light Regular"
+ },
+ "dm-sans": {
+  "datei": "dm-sans-700-normal.ttf",
+  "gewicht": 700,
+  "voller_name": "DM Sans 9pt Bold"
+ },
+ "josefin": {
+  "datei": "josefin-700-normal.ttf",
+  "gewicht": 700,
+  "voller_name": "Josefin Sans Thin Bold"
+ },
+ "manrope": {
+  "datei": "manrope-700-normal.ttf",
+  "gewicht": 700,
+  "voller_name": "Manrope ExtraLight Bold"
+ },
+ "montserrat": {
+  "datei": "montserrat-600-normal.ttf",
+  "gewicht": 600,
+  "voller_name": "Montserrat Thin SemiBold"
+ },
+ "oxanium": {
+  "datei": "oxanium-700-normal.ttf",
+  "gewicht": 700,
+  "voller_name": "Oxanium ExtraLight Bold"
+ },
+ "playfair": {
+  "datei": "playfair-900-normal.ttf",
+  "gewicht": 900,
+  "voller_name": "Playfair Display Black"
+ },
+ "poppins": {
+  "datei": "poppins-700-normal.ttf",
+  "gewicht": 700,
+  "voller_name": "Poppins Bold"
+ },
+ "rajdhani": {
+  "datei": "rajdhani-600-normal.ttf",
+  "gewicht": 600,
+  "voller_name": "Rajdhani SemiBold"
+ },
+ "young-serif": {
+  "datei": "young-serif-400-normal.ttf",
+  "gewicht": 400,
+  "voller_name": "Young Serif Regular"
+ }
+}

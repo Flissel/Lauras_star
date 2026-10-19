@@ -18,6 +18,7 @@ from ..sequences.music import sequence_music_tracks
 from ..sequences.transcript import sequence_transcript_blocks
 from ..storage import publish, store_from_env
 from .audio import AudioOverlay
+from . import schriften
 from .captions import build_ass, group_caption_lines
 from .captions_source import timeline_caption_words, voiceover_caption_words
 from .mp4 import _DEFAULT_DISCLOSURE, VideoTransition, render_clips_mp4, render_multilane_mp4
@@ -252,6 +253,16 @@ def _voiceover_spannen(db: Database, timeline_id: str) -> list[tuple[int, int]]:
 
 
 _SATZZEICHEN = ".,;:!?…\"'»«)”“"
+
+
+def untertitel_stil(opts: dict[str, Any]) -> tuple[str, str | None, str | None]:
+    """Marke in Reels (C1): (Schriftname fuer ASS, Akzentfarbe, fontsdir). Unbekannte Schrift oder Farbe fallen
+    still auf das bisherige Aussehen zurueck - die API prueft beides schon, das hier ist nur der Rueckfall."""
+    name = schriften.voller_name(str(opts.get("caption_schrift") or ""))
+    akzent = opts.get("caption_akzent")
+    akzent = akzent if isinstance(akzent, str) and len(akzent) == 7 and akzent.startswith("#") and all(
+        c in "0123456789abcdefABCDEF" for c in akzent[1:]) else None
+    return (name or "Arial", akzent, str(schriften.ORDNER) if name else None)
 
 
 def untertitel_ersetzen(words: list, ersatz: dict[str, str] | None) -> list:
@@ -541,6 +552,9 @@ def handle_render(ctx: JobContext) -> dict[str, Any]:
                 position=_option_str(
                     opts, "caption_position", "bottom", {"top", "middle", "bottom"}
                 ),
+                # Marke in Reels (C1): Schrift und Akzentfarbe nur, wenn gesetzt - sonst Arial wie bisher
+                font=untertitel_stil(opts)[0],
+                akzent=untertitel_stil(opts)[1],
             )
 
     # Burn plain SRT captions into the standard MP4 export (non-reel path).
@@ -607,6 +621,10 @@ def handle_render(ctx: JobContext) -> dict[str, Any]:
                 # Feinschliff (18.10.2026): nur gesetzt, wenn angefordert - sonst Aufruf wie bisher.
                 **({"reel_blur_fill": True} if opts.get("rahmung") == "einpassen" else {}),
                 **({"loudnorm": True} if opts.get("loudnorm") is True else {}),
+                # Marke in Reels (C1): nur gesetzt, wenn angefordert - sonst Aufruf wie bisher.
+                **({"caption_fontsdir": untertitel_stil(opts)[2]} if caption_ass and untertitel_stil(opts)[2] else {}),
+                **({"hook_font": str(schriften.datei(str(opts["hook_schrift"])))}
+                   if schriften.datei(str(opts.get("hook_schrift") or "")) else {}),
                 hook_text=opts.get("hook_text"),  # type: ignore[arg-type]
                 disclosure_text=disc_text,
                 caption_ass=caption_ass,

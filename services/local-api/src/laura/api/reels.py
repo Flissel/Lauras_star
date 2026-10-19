@@ -73,6 +73,10 @@ def render_reel(
         options["loudnorm"] = body.loudnorm
     if body.untertitel_ersetzen:
         options["untertitel_ersetzen"] = body.untertitel_ersetzen
+    # Marke in Reels (C1): nur gespeichert, wenn gesetzt
+    for feld in ("caption_schrift", "caption_akzent", "hook_schrift"):
+        if getattr(body, feld) is not None:
+            options[feld] = getattr(body, feld)
     if body.max_bytes is not None:
         options["max_bytes"] = body.max_bytes
     if body.kennzeichnung == "auto":

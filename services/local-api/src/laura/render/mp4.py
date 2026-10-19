@@ -21,7 +21,7 @@ from pathlib import Path
 
 from ..ingest.ffmpeg import FFmpegError, probe, run_ffmpeg
 from .audio import AudioOverlay
-from .reel import reel_blur_fill_graph, reel_video_chain, resolve_font
+from .reel import _drawtext_pfad, reel_blur_fill_graph, reel_video_chain, resolve_font
 from .zoom import ZoomSpec, zoom_concat_graph
 
 logger = logging.getLogger(__name__)
@@ -541,6 +541,18 @@ def _xfade_base_graph(
     return parts, v_acc, a_acc
 
 
+def untertitel_filter(ass_basename: str | None, srt_basename: str | None, fontsdir: str | None) -> str:
+    """Untertitel-Filter; mit ``fontsdir`` findet libass die Markenschriften (Marke in Reels, C1)."""
+    if ass_basename:
+        if fontsdir:
+            # Maskierung wie drawtext (Windows-Laufwerk C\\:, Schraegstriche); unter Linux unveraendert
+            return f"ass={ass_basename}:fontsdir={_drawtext_pfad(fontsdir.replace(chr(92), '/'))}"
+        return f"ass={ass_basename}"
+    if srt_basename:
+        return f"subtitles={srt_basename}"
+    return ""
+
+
 def render_clips_mp4(
     clips: list[tuple[Path, int, int]],
     dest: Path,
@@ -560,6 +572,8 @@ def render_clips_mp4(
     video_transitions: list[VideoTransition] | None = None,
     loudnorm: bool = False,
     zoom_specs: list[ZoomSpec | None] | None = None,
+    caption_fontsdir: str | None = None,
+    hook_font: str | None = None,
 ) -> None:
     """Trim each clip by frame range (end-exclusive) and concat into one MP4.
 
@@ -714,15 +728,11 @@ def render_clips_mp4(
             hook_textfile=hook_tf,
             disclosure_textfile=disc_tf,
             font=resolve_font(),
+            hook_font=_drawtext_pfad(hook_font.replace(chr(92), "/")) if hook_font else None,
             out_w=out_w,
             out_h=out_h,
         )
-        if ass_basename:
-            caption_filter = f"ass={ass_basename}"
-        elif srt_basename:
-            caption_filter = f"subtitles={srt_basename}"
-        else:
-            caption_filter = ""
+        caption_filter = untertitel_filter(ass_basename, srt_basename, caption_fontsdir)
         if use_zoom:
             # zoom_hybrid: per-segment blurred-full-frame -> static end-window crop dissolve
             # (Task 7's zoom_concat_graph). Emits "[abase]" directly when has_base_audio, which

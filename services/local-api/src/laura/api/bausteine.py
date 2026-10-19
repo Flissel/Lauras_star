@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from ..auth import Principal, require_permission
 from ..bausteine.filter import umbrechen
@@ -38,6 +38,16 @@ class TitelkarteRequest(BaseModel):
     textfarbe: str = Field(default="#ffffff", pattern=_FARBE)
     logo_asset_id: str | None = None
     dauer_s: float = Field(default=2.5, ge=1.0, le=8.0)
+    # Marke in Reels (C1): Anzeigeschrift der Marke (ID aus laura/assets/schriften); ohne = bisherige Schrift
+    schrift: str | None = None
+
+    @field_validator("schrift")
+    @classmethod
+    def _markenschrift(cls, v: str | None) -> str | None:
+        from ..render import schriften
+        if v is not None and v not in schriften.REGISTER:
+            raise ValueError(f"unbekannte Schrift: {v}")
+        return v
 
 
 def _db(request: Request) -> Database:

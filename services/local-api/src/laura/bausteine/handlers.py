@@ -16,7 +16,8 @@ from ..db import repos
 from ..ingest.ffmpeg import run_ffmpeg
 from ..ingest.probe import probe_asset, sha256_file
 from ..jobs.runner import JobContext, JobHandler
-from ..render.reel import resolve_font
+from ..render import schriften
+from ..render.reel import _drawtext_pfad, resolve_font
 from ..util import new_id
 from .filter import farbe_ffmpeg, standbild_graph, titelkarte_graph, umbrechen
 
@@ -79,6 +80,12 @@ def handle_standbild(ctx: JobContext) -> dict[str, Any]:
         raise
 
 
+def titelkarte_schrift(p: dict[str, Any]) -> str:
+    """Marke in Reels (C1): Anzeigeschrift der Marke, sonst die bisherige Schrift."""
+    datei = schriften.datei(str(p.get("schrift") or ""))
+    return _drawtext_pfad(str(datei).replace("\\", "/")) if datei else resolve_font()
+
+
 def handle_titelkarte(ctx: JobContext) -> dict[str, Any]:
     """Payload ``{project_id, text, unterzeile?, hintergrund, textfarbe, logo_asset_id?, dauer_s}``."""
     p = ctx.payload
@@ -101,7 +108,7 @@ def handle_titelkarte(ctx: JobContext) -> dict[str, Any]:
         if str(p.get("unterzeile") or "").strip():
             (arbeit / "u.txt").write_text(str(p["unterzeile"]).strip(), encoding="utf-8")
             unter = "u.txt"
-        graph = titelkarte_graph(dateien, schriftgroesse=groesse, font=resolve_font(),
+        graph = titelkarte_graph(dateien, schriftgroesse=groesse, font=titelkarte_schrift(p),
                                  textfarbe=str(p.get("textfarbe") or "#ffffff"),
                                  unterzeile_datei=unter, mit_logo=logo is not None,
                                  w=BREITE, h=HOEHE)

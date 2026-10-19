@@ -837,6 +837,19 @@ class ReelRenderRequest(BaseModel):
     logo_asset_id: str | None = None
     logo_position: Literal["oben_rechts", "oben_links", "oben_mitte"] = "oben_rechts"
     logo_breite_prozent: int = Field(default=14, ge=8, le=25)
+    # Marke in Reels (Video-Claw Paket C1, 19.10.2026): Schrift-IDs aus laura/assets/schriften (Editor-Register),
+    # Akzentfarbe fuer das gerade gesprochene Wort. Ohne Angabe bleibt das bisherige Aussehen.
+    caption_schrift: str | None = None
+    caption_akzent: str | None = Field(default=None, pattern=r"^#[0-9a-fA-F]{6}$")
+    hook_schrift: str | None = None
+
+    @field_validator("caption_schrift", "hook_schrift")
+    @classmethod
+    def _markenschrift(cls, v: str | None) -> str | None:
+        from ..render import schriften
+        if v is not None and v not in schriften.REGISTER:
+            raise ValueError(f"unbekannte Schrift: {v}")
+        return v
 
     @field_validator("disclosure_text", mode="before")
     @classmethod

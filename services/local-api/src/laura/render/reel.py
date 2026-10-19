@@ -23,6 +23,7 @@ def reel_video_chain(
     hook_textfile: str | None = None,
     disclosure_textfile: str | None = None,
     font: str,
+    hook_font: str | None = None,
     reel_fit: bool = False,
     out_w: int = 1080,
     out_h: int = 1920,
@@ -94,7 +95,7 @@ def reel_video_chain(
 
     if hook_textfile:
         parts.append(
-            f"drawtext=fontfile={font}:textfile={hook_textfile}"
+            f"drawtext=fontfile={hook_font or font}:textfile={hook_textfile}"
             ":x=(w-text_w)/2:y=120:fontsize=64:fontcolor=white"
             ":box=1:boxcolor=black@0.5"
         )

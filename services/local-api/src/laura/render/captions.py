@@ -79,6 +79,29 @@ def _escape_ass_text(text: str) -> str:
     return text
 
 
+def farbe_ass(hexfarbe: str) -> str:
+    """``#rrggbb`` -> ASS ``&H00BBGGRR`` (ASS speichert Blau-Gruen-Rot, Alpha 00 = deckend)."""
+    h = hexfarbe.lstrip("#")
+    return f"&H00{h[4:6]}{h[2:4]}{h[0:2]}".upper()
+
+
+def _akzent_dialoge(words: Line, rate_num: int, rate_den: int, akzent: str, line_end: int) -> list[str]:
+    """Marke in Reels (C1): je Wort ein Ereignis, das nur dieses Wort in der Akzentfarbe zeigt - von seinem Start
+    bis zum Start des naechsten (das letzte bis Zeilenende), luecken- und ueberlappungsfrei."""
+    # Inline-Farbe ohne Alpha: \1c&HBBGGRR& (farbe_ass liefert &H00BBGGRR fuer den Stil)
+    an, aus = f"{{\\1c&H{farbe_ass(akzent)[4:]}&}}", "{\\1c&HFFFFFF&}"
+    texte = [_escape_ass_text(w[0]) for w in words]
+    zeilen = []
+    for i, (_t, start, _ende) in enumerate(words):
+        ende = words[i + 1][1] if i + 1 < len(words) else line_end
+        if ende <= start:
+            continue
+        teile = [f"{an}{x}{aus}" if j == i else x for j, x in enumerate(texte)]
+        zeilen.append(f"Dialogue: 0,{_frame_to_ass_time(start, rate_num, rate_den)},"
+                      f"{_frame_to_ass_time(ende, rate_num, rate_den)},Reel,,0,0,0,,{' '.join(teile)}")
+    return zeilen
+
+
 def _kf_cs(start_frame: int, end_frame: int, rate_num: int, rate_den: int) -> int:
     """Duration of a karaoke syllable in centiseconds (rounded to nearest int)."""
     duration_cs_num = (end_frame - start_frame) * rate_den * 100
@@ -178,6 +201,8 @@ def build_ass(
     margin_v: int = 250,
     mode: str = "karaoke",
     position: str = "bottom",
+    font: str = "Arial",
+    akzent: str | None = None,
 ) -> str:
     """Build a complete ASS document with karaoke word-by-word highlighting.
 
@@ -198,6 +223,12 @@ def build_ass(
         ``"karaoke"`` emits per-word ``\\kf`` tags; ``"normal"`` emits plain lines.
     position:
         ``"top"``, ``"middle"`` or ``"bottom"`` mapped to ASS centre alignments.
+    font:
+        Vollstaendiger Schriftname (Marke in Reels, C1); die Datei ist dann schon die fette Fassung,
+        darum ohne kuenstliches Fett. Vorgabe ``"Arial"`` fett wie bisher.
+    akzent:
+        ``#rrggbb``: im Karaoke-Modus steht das gerade gesprochene Wort in dieser Farbe, der Rest weiss
+        (statt ``\\kf``-Fuellung). ``None`` = bisheriges Verhalten.
 
     Returns
     -------
@@ -226,13 +257,13 @@ def build_ass(
 
     style_fields = (
         "Reel"           # Name
-        ",Arial"         # Fontname
+        f",{font}"       # Fontname
         f",{fontsize}"   # Fontsize
         ",&H00FFFFFF"    # PrimaryColour   — white
         ",&H0000FFFF"    # SecondaryColour — karaoke pre-highlight (cyan)
         ",&H00000000"    # OutlineColour   — black
         ",&H80000000"    # BackColour      — semi-transparent black
-        ",1"             # Bold
+        f",{1 if font == 'Arial' else 0}"  # Bold - Markenschrift ist schon die fette Datei
         ",0"             # Italic
         ",0"             # Underline
         ",0"             # StrikeOut
@@ -267,6 +298,9 @@ def build_ass(
         end_frame = non_empty[-1][2]
         start_t = _frame_to_ass_time(start_frame, rate_num, rate_den)
         end_t = _frame_to_ass_time(end_frame, rate_num, rate_den)
+        if akzent and caption_mode == "karaoke":
+            dialogue_rows.extend(_akzent_dialoge(non_empty, rate_num, rate_den, akzent, end_frame))
+            continue
         text = _build_dialogue_text(non_empty, rate_num, rate_den, mode=caption_mode)
         dialogue_rows.append(
             f"Dialogue: 0,{start_t},{end_t},Reel,,0,0,0,,{text}"
